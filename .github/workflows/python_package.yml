@@ -524,7 +524,6 @@ jobs:
           anaconda upload \
             --package lightgbm \
             --force \
-            --force-metadata-update \
             -t pypi \
             ${BUILD_ARTIFACTSTAGINGDIRECTORY}/lightgbm-*.tar.gz \
             ${BUILD_ARTIFACTSTAGINGDIRECTORY}/*.whl
