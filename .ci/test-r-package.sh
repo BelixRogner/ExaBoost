@@ -6,14 +6,14 @@ set -e -E -u -o pipefail
 ARCH=$(uname -m)
 
 # set up R environment
-CRAN_MIRROR="https://cran.rstudio.com"
-R_LIB_PATH=~/Rlib
+export CRAN_MIRROR="https://cran.rstudio.com"
+export R_LIB_PATH=~/Rlib
 mkdir -p $R_LIB_PATH
 export R_LIBS=$R_LIB_PATH
 export PATH="$R_LIB_PATH/R/bin:$PATH"
 
 # don't fail builds for long-running examples unless they're very long.
-# See https://github.com/microsoft/LightGBM/issues/4049#issuecomment-793412254.
+# See https://github.com/lightgbm-org/LightGBM/issues/4049#issuecomment-793412254.
 if [[ $R_BUILD_TYPE != "cran" ]]; then
     export _R_CHECK_EXAMPLE_TIMING_THRESHOLD_=30
 fi
@@ -49,6 +49,7 @@ if [[ $OS_NAME == "linux" ]]; then
         --no-install-recommends \
         -y \
             devscripts \
+            libuv1-dev \
             r-base-core=${R_LINUX_VERSION} \
             r-base-dev=${R_LINUX_VERSION} \
             texinfo \
@@ -105,22 +106,15 @@ fi
 
 # {Matrix} needs {lattice}, so this needs to run before manually installing {Matrix}.
 # This should be unnecessary on R >=4.4.0
-# ref: https://github.com/microsoft/LightGBM/issues/6433
+# ref: https://github.com/lightgbm-org/LightGBM/issues/6433
 Rscript --vanilla -e "install.packages('lattice', repos = '${CRAN_MIRROR}', lib = '${R_LIB_PATH}')"
 
 # manually install {Matrix}, as {Matrix}=1.7-0 raised its R floor all the way to R 4.4.0
-# ref: https://github.com/microsoft/LightGBM/issues/6433
+# ref: https://github.com/lightgbm-org/LightGBM/issues/6433
 Rscript --vanilla -e "install.packages('https://cran.r-project.org/src/contrib/Archive/Matrix/Matrix_1.6-5.tar.gz', repos = NULL, lib = '${R_LIB_PATH}')"
 
-# Manually install Depends and Imports libraries + 'knitr', 'markdown', 'RhpcBLASctl', 'testthat'
-# to avoid a CI-time dependency on devtools (for devtools::install_deps())
-packages="c('data.table', 'jsonlite', 'knitr', 'markdown', 'R6', 'RhpcBLASctl', 'testthat')"
-compile_from_source="both"
-if [[ $OS_NAME == "macos" ]]; then
-    packages+=", type = 'binary'"
-    compile_from_source="never"
-fi
-Rscript --vanilla -e "options(install.packages.compile.from.source = '${compile_from_source}'); install.packages(${packages}, repos = '${CRAN_MIRROR}', lib = '${R_LIB_PATH}', dependencies = c('Depends', 'Imports', 'LinkingTo'), Ncpus = parallel::detectCores())" || exit 1
+# Manually install dependencies to avoid a CI-time dependency on devtools (for devtools::install_deps())
+Rscript --vanilla ./.ci/install-r-deps.R --build --test --exclude=Matrix || exit 1
 
 cd "${BUILD_DIRECTORY}"
 PKG_TARBALL="lightgbm_$(head -1 VERSION.txt).tar.gz"
@@ -158,6 +152,10 @@ elif [[ $R_BUILD_TYPE == "cran" ]]; then
     mkdir -p "${R_CMD_CHECK_DIR}"
     mv "${PKG_TARBALL}" "${R_CMD_CHECK_DIR}"
     cd "${R_CMD_CHECK_DIR}"
+fi
+
+if [[ $PRODUCES_ARTIFACTS == "true" ]]; then
+    cp "${PKG_TARBALL}" "${BUILD_ARTIFACTSTAGINGDIRECTORY}/lightgbm-${LGB_VER}-r-cran.tar.gz"
 fi
 
 declare -i allowed_notes=0
@@ -211,7 +209,7 @@ fi
 # actually use MM_PREFETCH preprocessor definition
 #
 # _mm_prefetch will not work on arm64 architecture
-# ref: https://github.com/microsoft/LightGBM/issues/4124
+# ref: https://github.com/lightgbm-org/LightGBM/issues/4124
 if [[ $ARCH != "arm64" ]]; then
     if [[ $R_BUILD_TYPE == "cran" ]]; then
         mm_prefetch_working=$(

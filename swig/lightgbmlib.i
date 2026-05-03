@@ -1,5 +1,6 @@
 /*!
- * Copyright (c) 2018 Microsoft Corporation. All rights reserved.
+ * Copyright (c) 2018-2026 Microsoft Corporation. All rights reserved.
+ * Copyright (c) 2018-2026 The LightGBM developers. All rights reserved.
  * Licensed under the MIT License. See LICENSE file in the project root for license information.
  */
 /* lightgbmlib.i */
@@ -32,6 +33,9 @@
 %typemap(in, numinputs = 0) JNIEnv *jenv %{
   $1 = jenv;
 %}
+
+%newobject LGBM_BoosterSaveModelToStringSWIG;
+%newobject LGBM_BoosterDumpModelSWIG;
 
 %inline %{
   char * LGBM_BoosterSaveModelToStringSWIG(BoosterHandle handle,

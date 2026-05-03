@@ -1,5 +1,6 @@
 /*!
- * Copyright (c) 2017 Microsoft Corporation. All rights reserved.
+ * Copyright (c) 2017-2026 Microsoft Corporation. All rights reserved.
+ * Copyright (c) 2017-2026 The LightGBM developers. All rights reserved.
  * Licensed under the MIT License. See LICENSE file in the project root for license information.
  */
 
@@ -51,7 +52,7 @@ void delete_cpp_char_vec(SEXP R_ptr) {
 }
 
 // Note: MSVC has issues with Altrep classes, so they are disabled for it.
-// See: https://github.com/microsoft/LightGBM/pull/6213#issuecomment-2111025768
+// See: https://github.com/lightgbm-org/LightGBM/pull/6213#issuecomment-2111025768
 #ifdef _MSC_VER
 #  define LGB_NO_ALTREP
 #endif
@@ -270,7 +271,7 @@ void _DatasetFinalizer(SEXP handle) {
 SEXP LGBM_NullBoosterHandleError_R() {
   Rf_error(
       "Attempting to use a Booster which no longer exists and/or cannot be restored. "
-      "This can happen if you have called Booster$finalize() "
+      "This can happen if the Booster's finalizer was called "
       "or if this Booster was saved through saveRDS() using 'serializable=FALSE'.");
   return R_NilValue;
 }
@@ -285,7 +286,7 @@ void _AssertDatasetHandleNotNull(SEXP handle) {
   if (Rf_isNull(handle) || !R_ExternalPtrAddr(handle)) {
     Rf_error(
       "Attempting to use a Dataset which no longer exists. "
-      "This can happen if you have called Dataset$finalize() or if this Dataset was saved with saveRDS(). "
+      "This can happen if the Dataset's finalizer was called or if this Dataset was saved with saveRDS(). "
       "To avoid this error in the future, use lgb.Dataset.save() or Dataset$save_binary() to save lightgbm Datasets.");
   }
 }
@@ -739,8 +740,8 @@ SEXP LGBM_BoosterGetNumFeature_R(SEXP handle) {
 SEXP LGBM_BoosterUpdateOneIter_R(SEXP handle) {
   R_API_BEGIN();
   _AssertBoosterHandleNotNull(handle);
-  int is_finished = 0;
-  CHECK_CALL(LGBM_BoosterUpdateOneIter(R_ExternalPtrAddr(handle), &is_finished));
+  int produced_empty_tree = 0;
+  CHECK_CALL(LGBM_BoosterUpdateOneIter(R_ExternalPtrAddr(handle), &produced_empty_tree));
   return R_NilValue;
   R_API_END();
 }
@@ -751,12 +752,13 @@ SEXP LGBM_BoosterUpdateOneIterCustom_R(SEXP handle,
   SEXP len) {
   R_API_BEGIN();
   _AssertBoosterHandleNotNull(handle);
-  int is_finished = 0;
+  int produced_empty_tree = 0;
   int int_len = Rf_asInteger(len);
   std::unique_ptr<float[]> tgrad(new float[int_len]), thess(new float[int_len]);
   std::copy(REAL(grad), REAL(grad) + int_len, tgrad.get());
   std::copy(REAL(hess), REAL(hess) + int_len, thess.get());
-  CHECK_CALL(LGBM_BoosterUpdateOneIterCustom(R_ExternalPtrAddr(handle), tgrad.get(), thess.get(), &is_finished));
+  CHECK_CALL(LGBM_BoosterUpdateOneIterCustom(R_ExternalPtrAddr(handle), tgrad.get(), thess.get(),
+    &produced_empty_tree));
   return R_NilValue;
   R_API_END();
 }

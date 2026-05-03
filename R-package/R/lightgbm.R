@@ -69,6 +69,9 @@
 #'          in \code{params}, that metric will be considered the "first" one. If you omit \code{metric},
 #'          a default metric will be used based on your choice for the parameter \code{obj} (keyword argument)
 #'          or \code{objective} (passed into \code{params}).
+#'
+#'          \bold{NOTE:} if using \code{boosting_type="dart"}, any early stopping configuration will be ignored
+#'          and early stopping will not be performed.
 #' @section Model serialization:
 #'
 #'          LightGBM model objects can be serialized and de-serialized through functions such as \code{save}
@@ -278,7 +281,7 @@ lightgbm <- function(data,
 #' https://archive.ics.uci.edu/ml/datasets/Mushroom
 #'
 #' Bache, K. & Lichman, M. (2013). UCI Machine Learning Repository
-#' [http://archive.ics.uci.edu/ml]. Irvine, CA: University of California,
+#' [https://archive.ics.uci.edu/ml]. Irvine, CA: University of California,
 #' School of Information and Computer Science.
 #'
 #' @docType data
@@ -302,7 +305,7 @@ NULL
 #' https://archive.ics.uci.edu/ml/datasets/Mushroom
 #'
 #' Bache, K. & Lichman, M. (2013). UCI Machine Learning Repository
-#' [http://archive.ics.uci.edu/ml]. Irvine, CA: University of California,
+#' [https://archive.ics.uci.edu/ml]. Irvine, CA: University of California,
 #' School of Information and Computer Science.
 #'
 #' @docType data
@@ -321,7 +324,7 @@ NULL
 #'              randomly selected from 3 (older version of this dataset with less inputs).
 #'
 #' @references
-#' http://archive.ics.uci.edu/ml/datasets/Bank+Marketing
+#' https://archive.ics.uci.edu/ml/datasets/Bank+Marketing
 #'
 #' S. Moro, P. Cortez and P. Rita. (2014)
 #' A Data-Driven Approach to Predict the Success of Bank Telemarketing. Decision Support Systems

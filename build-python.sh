@@ -54,15 +54,17 @@
 #     --precompile
 #                                   Use precompiled library.
 #                                   Only used with 'install' command.
+#     --rocm
+#                                   Compile ROCm version.
 #     --time-costs
-#                                   Output time costs for different internal routines.
+#                                   Compile version that outputs time costs for different internal routines.
 #     --user
 #                                   Install into user-specific instead of global site-packages directory.
 #                                   Only used with 'install' command.
 
 set -e -u
 
-echo "building lightgbm"
+echo "[INFO] building lightgbm"
 
 # Default values of arguments
 INSTALL="false"
@@ -136,12 +138,14 @@ while [ $# -gt 0 ]; do
     # flags #
     #########
     --bit32)
-        export CMAKE_GENERATOR="Visual Studio 17 2022"
-        export CMAKE_GENERATOR_PLATFORM="Win32"
-        echo "[INFO] Attempting to build 32-bit version of LightGBM, which is only supported on Windows with generator '${CMAKE_GENERATOR}'."
+        echo "[INFO] Attempting to build 32-bit version of LightGBM, which is only supported on Windows with Visual Studio."
+        BUILD_ARGS="${BUILD_ARGS} --config-setting=cmake.args=-AWin32"
         ;;
     --cuda)
         BUILD_ARGS="${BUILD_ARGS} --config-setting=cmake.define.USE_CUDA=ON"
+        ;;
+    --rocm)
+        BUILD_ARGS="${BUILD_ARGS} --config-setting=cmake.define.USE_ROCM=ON"
         ;;
     --gpu)
         BUILD_ARGS="${BUILD_ARGS} --config-setting=cmake.define.USE_GPU=ON"
@@ -150,9 +154,9 @@ while [ $# -gt 0 ]; do
         BUILD_ARGS="${BUILD_ARGS} --config-setting=cmake.define.__INTEGRATE_OPENCL=ON"
         ;;
     --mingw)
-        export CMAKE_GENERATOR='MinGW Makefiles'
         # ref: https://stackoverflow.com/a/45104058/3986677
         BUILD_ARGS="${BUILD_ARGS} --config-setting=cmake.define.CMAKE_SH=CMAKE_SH-NOTFOUND"
+        BUILD_ARGS="${BUILD_ARGS} --config-setting=cmake.args=-G'MinGW Makefiles'"
         ;;
     --mpi)
         BUILD_ARGS="${BUILD_ARGS} --config-setting=cmake.define.USE_MPI=ON"
@@ -174,7 +178,7 @@ while [ $# -gt 0 ]; do
         PIP_INSTALL_ARGS="${PIP_INSTALL_ARGS} --user"
         ;;
     *)
-        echo "invalid argument '${1}'"
+        echo "[ERROR] invalid argument '${1}'. Aborting"
         exit 1
         ;;
   esac
@@ -290,11 +294,11 @@ create_isolated_source_dir
 
 cd ./lightgbm-python
 
-# installation involves building the wheel + `pip install`-ing it
+# if 'install' was passed, choose the type of package to build and install
 if test "${INSTALL}" = true; then
     if test "${PRECOMPILE}" = true; then
-        BUILD_SDIST=true
-        BUILD_WHEEL=false
+        BUILD_SDIST=false
+        BUILD_WHEEL=true
         BUILD_ARGS=""
         rm -rf \
             ./cmake \
@@ -303,79 +307,94 @@ if test "${INSTALL}" = true; then
             ./include \
             ./src \
             ./swig
-        # use regular-old setuptools for these builds, to avoid
-        # trying to recompile the shared library
+        # avoid trying to recompile, just use hatchling and copy in relevant files
         sed -i.bak -e '/start:build-system/,/end:build-system/d' pyproject.toml
-        # shellcheck disable=SC2129
-        echo '[build-system]' >> ./pyproject.toml
-        echo 'requires = ["setuptools"]' >> ./pyproject.toml
-        echo 'build-backend = "setuptools.build_meta"' >> ./pyproject.toml
-        echo "" >> ./pyproject.toml
-        echo "recursive-include lightgbm *.dll *.dylib *.so" > ./MANIFEST.in
-        echo "" >> ./MANIFEST.in
+
+# replace build backend configuration
+cat >> ./pyproject.toml <<EOF
+
+[build-system]
+requires = ["hatchling>=1.27.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+# do not consider .gitignore when choosing files to include / exclude
+ignore-vcs = true
+packages = ["lightgbm"]
+
+EOF
         mkdir -p ./lightgbm/lib
         if test -f ../lib_lightgbm.so; then
-            echo "found pre-compiled lib_lightgbm.so"
+            echo "[INFO] found pre-compiled lib_lightgbm.so"
             cp ../lib_lightgbm.so ./lightgbm/lib/lib_lightgbm.so
         elif test -f ../lib_lightgbm.dylib; then
-            echo "found pre-compiled lib_lightgbm.dylib"
+            echo "[INFO] found pre-compiled lib_lightgbm.dylib"
             cp ../lib_lightgbm.dylib ./lightgbm/lib/lib_lightgbm.dylib
+        elif test -f ../lib_lightgbm.dll; then
+            echo "[INFO] found pre-compiled lib_lightgbm.dll"
+            cp ../lib_lightgbm.dll ./lightgbm/lib/lib_lightgbm.dll
         elif test -f ../Release/lib_lightgbm.dll; then
-            echo "found pre-compiled Release/lib_lightgbm.dll"
+            echo "[INFO] found pre-compiled Release/lib_lightgbm.dll"
             cp ../Release/lib_lightgbm.dll ./lightgbm/lib/lib_lightgbm.dll
         elif test -f ../windows/x64/DLL/lib_lightgbm.dll; then
-            echo "found pre-compiled windows/x64/DLL/lib_lightgbm.dll"
+            echo "[INFO] found pre-compiled windows/x64/DLL/lib_lightgbm.dll"
             cp ../windows/x64/DLL/lib_lightgbm.dll ./lightgbm/lib/lib_lightgbm.dll
             cp ../windows/x64/DLL/lib_lightgbm.lib ./lightgbm/lib/lib_lightgbm.lib
+        elif test -f ../windows/x64/Debug_DLL/lib_lightgbm.dll; then
+            echo "[INFO] found pre-compiled windows/x64/Debug_DLL/lib_lightgbm.dll"
+            cp ../windows/x64/Debug_DLL/lib_lightgbm.dll ./lightgbm/lib/lib_lightgbm.dll
+            cp ../windows/x64/Debug_DLL/lib_lightgbm.lib ./lightgbm/lib/lib_lightgbm.lib
+        else
+            echo "[ERROR] cannot find pre-compiled library. Aborting"
+            exit 1
         fi
         rm -f ./*.bak
-    else
+    fi
+
+    # at this point, if 'install' was passed but the package type wasn't indicated, prefer wheel
+    if test "${BUILD_SDIST}" = false && test "${BUILD_WHEEL}" = false; then
+        echo "[INFO] 'install' passed but no package type ('bdist_wheel', 'sdist') chosen. Defaulting to 'bdist_wheel'."
         BUILD_SDIST="false"
         BUILD_WHEEL="true"
     fi
 fi
 
 if test "${BUILD_SDIST}" = true; then
-    echo "--- building sdist ---"
+    echo "[INFO] --- building sdist ---"
     rm -f ../dist/*.tar.gz
-    # shellcheck disable=SC2086
-    python -m build \
-        --sdist \
-        --outdir ../dist \
-        ${BUILD_ARGS} \
-        .
+    # use xargs to work with args that contain whitespaces
+    # note that empty echo string leads to that xargs doesn't run the command
+    # in some implementations of xargs
+    # ref: https://stackoverflow.com/a/8296746
+    echo "--sdist --outdir ../dist ${BUILD_ARGS} ." | xargs python -m build
 fi
 
 if test "${BUILD_WHEEL}" = true; then
-    echo "--- building wheel ---"
+    echo "[INFO] --- building wheel ---"
     rm -f ../dist/*.whl || true
-    # shellcheck disable=SC2086
-    python -m build \
-        --wheel \
-        --outdir ../dist \
-        ${BUILD_ARGS} \
-        .
+    # use xargs to work with args that contain whitespaces
+    # note that empty echo string leads to that xargs doesn't run the command
+    # in some implementations of xargs
+    # ref: https://stackoverflow.com/a/8296746
+    echo "--wheel --outdir ../dist ${BUILD_ARGS} ." | xargs python -m build
 fi
 
 if test "${INSTALL}" = true; then
-    echo "--- installing lightgbm ---"
-    cd ../dist
+    echo "[INFO] --- installing lightgbm ---"
+    cd ..
     if test "${BUILD_WHEEL}" = true; then
-        PACKAGE_NAME="$(echo lightgbm*.whl)"
+        PACKAGE_FILE="$(echo dist/lightgbm*.whl)"
     else
-        PACKAGE_NAME="$(echo lightgbm*.tar.gz)"
+        PACKAGE_FILE="$(echo dist/lightgbm*.tar.gz)"
     fi
-    # ref for use of '--find-links': https://stackoverflow.com/a/52481267/3986677
     # shellcheck disable=SC2086
     pip install \
         ${PIP_INSTALL_ARGS} \
         --force-reinstall \
         --no-cache-dir \
         --no-deps \
-        --find-links=. \
-        "${PACKAGE_NAME}"
-    cd ../
+        "${PACKAGE_FILE}"
 fi
 
-echo "cleaning up"
+echo "[INFO] cleaning up"
 rm -rf ./lightgbm-python

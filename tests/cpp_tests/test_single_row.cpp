@@ -1,5 +1,6 @@
 /*!
- * Copyright (c) 2022 Microsoft Corporation. All rights reserved.
+ * Copyright (c) 2022-2026 Microsoft Corporation. All rights reserved.
+ * Copyright (c) 2022-2026 The LightGBM developers. All rights reserved.
  * Licensed under the MIT License. See LICENSE file in the project root for license information.
  */
 
@@ -7,8 +8,10 @@
 #include <testutils.h>
 #include <LightGBM/c_api.h>
 
-#include <iostream>
+#include <algorithm>
 #include <fstream>
+#include <iostream>
+#include <vector>
 
 using LightGBM::TestUtils;
 
@@ -25,10 +28,10 @@ void test_predict_type(int predict_type, int num_predicts) {
     EXPECT_EQ(0, result) << "LGBM_BoosterCreate result code: " << result;
 
     for (int i = 0; i < 51; i++) {
-        int is_finished;
+        int produced_empty_tree;
         result = LGBM_BoosterUpdateOneIter(
             booster_handle,
-            &is_finished);
+            &produced_empty_tree);
         EXPECT_EQ(0, result) << "LGBM_BoosterUpdateOneIter result code: " << result;
     }
 

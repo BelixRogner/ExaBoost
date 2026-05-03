@@ -11,16 +11,6 @@ Booster <- R6::R6Class(
     record_evals = list(),
     data_processor = NULL,
 
-    # Finalize will free up the handles
-    finalize = function() {
-      .Call(
-        LGBM_BoosterFree_R
-        , private$handle
-      )
-      private$handle <- NULL
-      return(invisible(NULL))
-    },
-
     # Initialize will create a starter booster
     initialize = function(params = list(),
                           train_set = NULL,
@@ -711,6 +701,17 @@ Booster <- R6::R6Class(
     set_objective_to_none = FALSE,
     train_set_version = 0L,
     fast_predict_config = list(),
+
+    # finalize() will free up the handles
+    finalize = function() {
+      .Call(
+        LGBM_BoosterFree_R
+        , private$handle
+      )
+      private$handle <- NULL
+      return(invisible(NULL))
+    },
+
     # Predict data
     inner_predict = function(idx) {
 
@@ -873,6 +874,7 @@ Booster <- R6::R6Class(
 )
 
 #' @name lgb_predict_shared_params
+#' @title Shared prediction parameter docs
 #' @param type Type of prediction to output. Allowed types are:\itemize{
 #'             \item \code{"response"}: will output the predicted score according to the objective function being
 #'                   optimized (depending on the link function that the objective uses), after applying any necessary
@@ -914,6 +916,8 @@ Booster <- R6::R6Class(
 #'               the "Predict Parameters" section of the documentation} for a list of parameters and
 #'               valid values. Where these conflict with the values of keyword arguments to this function,
 #'               the values in \code{params} take precedence.
+#' @details This page contains shared documentation for prediction-related parameters used throughout the package.
+#' @keywords internal
 NULL
 
 #' @name predict.lgb.Booster
@@ -1017,7 +1021,7 @@ predict.lgb.Booster <- function(object,
                                 ...) {
 
   if (!.is_Booster(x = object)) {
-    stop("predict.lgb.Booster: object should be an ", sQuote("lgb.Booster"))
+    stop("predict.lgb.Booster: object should be an ", sQuote("lgb.Booster", q = FALSE))
   }
 
   additional_params <- list(...)
@@ -1174,7 +1178,7 @@ lgb.configure_fast_predict <- function(model,
                                        type = "response",
                                        params = list()) {
   if (!.is_Booster(x = model)) {
-    stop("lgb.configure_fast_predict: model should be an ", sQuote("lgb.Booster"))
+    stop("lgb.configure_fast_predict: model should be an ", sQuote("lgb.Booster", q = FALSE))
   }
   if (type == "class") {
     stop("type='class' is not supported for 'lgb.configure_fast_predict'. Use 'response' instead.")
@@ -1234,6 +1238,9 @@ print.lgb.Booster <- function(x, ...) {
 
   if (!handle_is_null) {
     obj <- x$params$objective
+    if (is.null(obj)) {
+      obj <- "(default)"
+    }
     if (obj == "none") {
       obj <- "custom"
     }
@@ -1387,7 +1394,7 @@ lgb.save <- function(
   ) {
 
   if (!.is_Booster(x = booster)) {
-    stop("lgb.save: booster should be an ", sQuote("lgb.Booster"))
+    stop("lgb.save: booster should be an ", sQuote("lgb.Booster", q = FALSE))
   }
 
   if (!(is.character(filename) && length(filename) == 1L)) {
@@ -1451,7 +1458,7 @@ lgb.save <- function(
 lgb.dump <- function(booster, num_iteration = NULL, start_iteration = 1L) {
 
   if (!.is_Booster(x = booster)) {
-    stop("lgb.dump: booster should be an ", sQuote("lgb.Booster"))
+    stop("lgb.dump: booster should be an ", sQuote("lgb.Booster", q = FALSE))
   }
 
   # Return booster at requested iteration
@@ -1515,7 +1522,7 @@ lgb.dump <- function(booster, num_iteration = NULL, start_iteration = 1L) {
 lgb.get.eval.result <- function(booster, data_name, eval_name, iters = NULL, is_err = FALSE) {
 
   if (!.is_Booster(x = booster)) {
-    stop("lgb.get.eval.result: Can only use ", sQuote("lgb.Booster"), " to get eval result")
+    stop("lgb.get.eval.result: Can only use ", sQuote("lgb.Booster", q = FALSE), " to get eval result")
   }
 
   if (!is.character(data_name) || !is.character(eval_name)) {

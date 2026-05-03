@@ -104,7 +104,7 @@ def plot_importance(
         The plot with model's feature importances.
     """
     if MATPLOTLIB_INSTALLED:
-        import matplotlib.pyplot as plt
+        import matplotlib.pyplot as plt  # noqa: PLC0415
     else:
         raise ImportError("You must install matplotlib and restart your session to plot importance.")
 
@@ -129,6 +129,11 @@ def plot_importance(
         tuples = [x for x in tuples if x[1] > 0]
     if max_num_features is not None and max_num_features > 0:
         tuples = tuples[-max_num_features:]
+    if not tuples:
+        raise ValueError(
+            "No non-zero feature importances found. The model may have no splits. "
+            "Use ignore_zero=False to show all features."
+        )
     labels, values = zip(*tuples)
 
     if ax is None:
@@ -140,7 +145,7 @@ def plot_importance(
     ax.barh(ylocs, values, align="center", height=height, **kwargs)
 
     for x, y in zip(values, ylocs):
-        ax.text(x + 1, y, _float2str(x, precision) if importance_type == "gain" else x, va="center")
+        ax.text(x + 1, float(y), _float2str(x, precision) if importance_type == "gain" else x, va="center")
 
     ax.set_yticks(ylocs)
     ax.set_yticklabels(labels)
@@ -235,8 +240,8 @@ def plot_split_value_histogram(
         The plot with specified model's feature split value histogram.
     """
     if MATPLOTLIB_INSTALLED:
-        import matplotlib.pyplot as plt
-        from matplotlib.ticker import MaxNLocator
+        import matplotlib.pyplot as plt  # noqa: PLC0415
+        from matplotlib.ticker import MaxNLocator  # noqa: PLC0415
     else:
         raise ImportError("You must install matplotlib and restart your session to plot split value histogram.")
 
@@ -342,7 +347,7 @@ def plot_metric(
         The plot with metric's history over the training.
     """
     if MATPLOTLIB_INSTALLED:
-        import matplotlib.pyplot as plt
+        import matplotlib.pyplot as plt  # noqa: PLC0415
     else:
         raise ImportError("You must install matplotlib and restart your session to plot metric.")
 
@@ -425,6 +430,7 @@ def plot_metric(
 
 
 def _determine_direction_for_numeric_split(
+    *,
     fval: float,
     threshold: float,
     missing_type_str: str,
@@ -450,6 +456,7 @@ def _determine_direction_for_categorical_split(fval: float, thresholds: str) -> 
 
 
 def _to_graphviz(
+    *,
     tree_info: Dict[str, Any],
     show_info: List[str],
     feature_names: Union[List[str], None],
@@ -466,7 +473,7 @@ def _to_graphviz(
       - https://graphviz.readthedocs.io/en/stable/api.html#digraph
     """
     if GRAPHVIZ_INSTALLED:
-        from graphviz import Digraph
+        from graphviz import Digraph  # noqa: PLC0415
     else:
         raise ImportError("You must install graphviz and restart your session to plot tree.")
 
@@ -810,8 +817,8 @@ def plot_tree(
         The plot with single tree.
     """
     if MATPLOTLIB_INSTALLED:
-        import matplotlib.image
-        import matplotlib.pyplot as plt
+        import matplotlib.image  # noqa: PLC0415
+        import matplotlib.pyplot as plt  # noqa: PLC0415
     else:
         raise ImportError("You must install matplotlib and restart your session to plot tree.")
 

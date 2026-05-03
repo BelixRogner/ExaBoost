@@ -1,10 +1,11 @@
 # coding: utf-8
 """Compatibility library."""
 
+import inspect
 from typing import TYPE_CHECKING, Any, List
 
 # scikit-learn is intentionally imported first here,
-# see https://github.com/microsoft/LightGBM/issues/6509
+# see https://github.com/lightgbm-org/LightGBM/issues/6509
 """sklearn"""
 try:
     from sklearn import __version__ as _sklearn_version
@@ -22,8 +23,20 @@ try:
         from sklearn.utils.validation import NotFittedError
     try:
         from sklearn.utils.validation import _check_sample_weight
+
+        # As of https://github.com/scikit-learn/scikit-learn/pull/32212, scikit-learn started raising an error
+        # when sample weights are all 0. This argument allow_all_zero_weights can be used switch back
+        # to the old behavior of allowing them.
+        #
+        # This can be removed when the minimum scikit-learn version supported here is v1.9.
+        SKLEARN_CHECK_SAMPLE_WEIGHT_HAS_ALLOW_ZERO_WEIGHTS_ARG = (
+            "allow_all_zero_weights" in inspect.signature(_check_sample_weight).parameters
+        )
+
     except ImportError:
         from sklearn.utils.validation import check_consistent_length
+
+        SKLEARN_CHECK_SAMPLE_WEIGHT_HAS_ALLOW_ZERO_WEIGHTS_ARG = False
 
         # dummy function to support older version of scikit-learn
         def _check_sample_weight(sample_weight: Any, X: Any, dtype: Any = None) -> Any:
@@ -36,23 +49,23 @@ try:
         # validate_data() was added in scikit-learn 1.6, this function roughly imitates it for older versions.
         # It can be removed when lightgbm's minimum scikit-learn version is at least 1.6.
         def validate_data(
-            _estimator,
-            X,
-            y="no_validation",
+            _estimator: Any,
+            X: Any,
+            y: Any = "no_validation",
             accept_sparse: bool = True,
             # 'force_all_finite' was renamed to 'ensure_all_finite' in scikit-learn 1.6
             ensure_all_finite: bool = False,
             ensure_min_samples: int = 1,
             # trap other keyword arguments that only work on scikit-learn >=1.6, like 'reset'
-            **ignored_kwargs,
-        ):
+            **ignored_kwargs: Any,
+        ) -> Any:
             # it's safe to import _num_features unconditionally because:
             #
             #  * it was first added in scikit-learn 0.24.2
             #  * lightgbm cannot be used with scikit-learn versions older than that
             #  * this validate_data() re-implementation will not be called in scikit-learn>=1.6
             #
-            from sklearn.utils.validation import _num_features
+            from sklearn.utils.validation import _num_features  # noqa: PLC0415
 
             # _num_features() raises a TypeError on 1-dimensional input. That's a problem
             # because scikit-learn's 'check_fit1d' estimator check sets that expectation that
@@ -114,6 +127,7 @@ try:
     _LGBMValidateData = validate_data
 except ImportError:
     SKLEARN_INSTALLED = False
+    SKLEARN_CHECK_SAMPLE_WEIGHT_HAS_ALLOW_ZERO_WEIGHTS_ARG = False
 
     class _LGBMModelBase:  # type: ignore
         """Dummy class for sklearn.base.BaseEstimator."""
@@ -202,25 +216,6 @@ try:
 except ImportError:
     GRAPHVIZ_INSTALLED = False
 
-"""datatable"""
-try:
-    import datatable
-
-    if hasattr(datatable, "Frame"):
-        dt_DataTable = datatable.Frame
-    else:
-        dt_DataTable = datatable.DataTable
-    DATATABLE_INSTALLED = True
-except ImportError:
-    DATATABLE_INSTALLED = False
-
-    class dt_DataTable:  # type: ignore
-        """Dummy class for datatable.DataTable."""
-
-        def __init__(self, *args: Any, **kwargs: Any):
-            pass
-
-
 """dask"""
 try:
     from dask import delayed
@@ -233,7 +228,7 @@ try:
 
     DASK_INSTALLED = True
 # catching 'ValueError' here because of this:
-# https://github.com/microsoft/LightGBM/issues/6365#issuecomment-2002330003
+# https://github.com/lightgbm-org/LightGBM/issues/6365#issuecomment-2002330003
 #
 # That's potentially risky as dask does some significant import-time processing,
 # like loading configuration from environment variables and files, and catching
@@ -288,6 +283,7 @@ try:
     from pyarrow import Array as pa_Array
     from pyarrow import ChunkedArray as pa_ChunkedArray
     from pyarrow import Table as pa_Table
+    from pyarrow import array as pa_array
     from pyarrow import chunked_array as pa_chunked_array
     from pyarrow.types import is_boolean as arrow_is_boolean
     from pyarrow.types import is_floating as arrow_is_floating
@@ -321,6 +317,7 @@ except ImportError:
         all = None
         equal = None
 
+    pa_array = None
     pa_chunked_array = None
     arrow_is_boolean = None
     arrow_is_integer = None

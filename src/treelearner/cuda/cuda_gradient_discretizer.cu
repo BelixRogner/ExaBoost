@@ -1,5 +1,6 @@
 /*!
- * Copyright (c) 2021 Microsoft Corporation. All rights reserved.
+ * Copyright (c) 2021-2026 Microsoft Corporation. All rights reserved.
+ * Copyright (c) 2021-2026 The LightGBM developers. All rights reserved.
  * Licensed under the MIT License. See LICENSE file in the project root for
  * license information.
  */
@@ -22,7 +23,7 @@ __global__ void ReduceMinMaxKernel(
   score_t* grad_max_block_buffer,
   score_t* hess_min_block_buffer,
   score_t* hess_max_block_buffer) {
-  __shared__ score_t shared_mem_buffer[32];
+  __shared__ score_t shared_mem_buffer[WARPSIZE];
   const data_size_t index = static_cast<data_size_t>(threadIdx.x + blockIdx.x * blockDim.x);
   score_t grad_max_val = kMinScore;
   score_t grad_min_val = kMaxScore;
@@ -56,7 +57,7 @@ __global__ void ReduceBlockMinMaxKernel(
   score_t* grad_max_block_buffer,
   score_t* hess_min_block_buffer,
   score_t* hess_max_block_buffer) {
-  __shared__ score_t shared_mem_buffer[32];
+  __shared__ score_t shared_mem_buffer[WARPSIZE];
   score_t grad_max_val = kMinScore;
   score_t grad_min_val = kMaxScore;
   score_t hess_max_val = kMinScore;
@@ -143,6 +144,19 @@ void CUDAGradientDiscretizer::DiscretizeGradients(
     hess_min_block_buffer_.RawData(),
     hess_max_block_buffer_.RawData());
     SynchronizeCUDADevice(__FILE__, __LINE__);
+
+  if (nccl_communicator_ != nullptr) {
+    SynchronizeCUDADevice(__FILE__, __LINE__);
+    cudaStream_t cuda_stream = CUDAStreamCreate();
+    NCCLGroupStart();
+    NCCLAllReduce<score_t>(grad_min_block_buffer_.RawDataReadOnly(), grad_min_block_buffer_.RawData(), 1, ncclFloat32, ncclMin, nccl_communicator_, cuda_stream);
+    NCCLAllReduce<score_t>(hess_min_block_buffer_.RawDataReadOnly(), hess_min_block_buffer_.RawData(), 1, ncclFloat32, ncclMin, nccl_communicator_, cuda_stream);
+    NCCLAllReduce<score_t>(grad_max_block_buffer_.RawDataReadOnly(), grad_max_block_buffer_.RawData(), 1, ncclFloat32, ncclMax, nccl_communicator_, cuda_stream);
+    NCCLAllReduce<score_t>(hess_max_block_buffer_.RawDataReadOnly(), hess_max_block_buffer_.RawData(), 1, ncclFloat32, ncclMax, nccl_communicator_, cuda_stream);
+    NCCLGroupEnd();
+    SynchronizeCUDAStream(cuda_stream, __FILE__, __LINE__);
+    CUDAStreamDestroy(cuda_stream);
+  }
 
   #define DiscretizeGradientsKernel_ARGS \
     num_data, \

@@ -10,6 +10,7 @@
 #'              \code{group = c(10, 20, 40, 10, 10, 10)}, that means that you have 6 groups,
 #'              where the first 10 records are in the first group, records 11-30 are in the
 #'              second group, etc.
+#' @details This page contains shared documentation for dataset-related parameters used throughout the package.
 #' @keywords internal
 NULL
 
@@ -30,16 +31,6 @@ Dataset <- R6::R6Class(
   cloneable = FALSE,
   public = list(
 
-    # Finalize will free up the handles
-    finalize = function() {
-      .Call(
-        LGBM_DatasetFree_R
-        , private$handle
-      )
-      private$handle <- NULL
-      return(invisible(NULL))
-    },
-
     # Initialize will create a starter dataset
     initialize = function(data,
                           params = list(),
@@ -56,10 +47,10 @@ Dataset <- R6::R6Class(
 
       # validate inputs early to avoid unnecessary computation
       if (!(is.null(reference) || .is_Dataset(reference))) {
-          stop("lgb.Dataset: If provided, reference must be a ", sQuote("lgb.Dataset"))
+          stop("lgb.Dataset: If provided, reference must be a ", sQuote("lgb.Dataset", q = FALSE))
       }
       if (!(is.null(predictor) || .is_Predictor(predictor))) {
-          stop("lgb.Dataset: If provided, predictor must be a ", sQuote("lgb.Predictor"))
+          stop("lgb.Dataset: If provided, predictor must be a ", sQuote("lgb.Predictor", q = FALSE))
       }
 
       info <- list()
@@ -159,10 +150,10 @@ Dataset <- R6::R6Class(
             cate_indices <- as.list(match(private$categorical_feature, private$colnames) - 1L)
 
             # Provided indices, but some indices are missing?
-            if (sum(is.na(cate_indices)) > 0L) {
+            if (anyNA(cate_indices)) {
               stop(
                 "lgb.Dataset.construct: supplied an unknown feature in categorical_feature: "
-                , sQuote(private$categorical_feature[is.na(cate_indices)])
+                , sQuote(private$categorical_feature[is.na(cate_indices)], q = FALSE)
               )
             }
 
@@ -210,7 +201,7 @@ Dataset <- R6::R6Class(
         if (is.null(private$raw_data)) {
           stop(paste0(
             "Attempting to create a Dataset without any raw data. "
-            , "This can happen if you have called Dataset$finalize() or if this Dataset was saved with saveRDS(). "
+            , "This can happen if the Dataset's finalizer was called or if this Dataset was saved with saveRDS(). "
             , "To avoid this error in the future, use lgb.Dataset.save() or "
             , "Dataset$save_binary() to save lightgbm Datasets."
           ))
@@ -260,7 +251,7 @@ Dataset <- R6::R6Class(
           # Unknown data type
           stop(
             "lgb.Dataset.construct: does not support constructing from "
-            , sQuote(class(private$raw_data))
+            , sQuote(class(private$raw_data), q = FALSE)
           )
 
         }
@@ -276,7 +267,7 @@ Dataset <- R6::R6Class(
         handle <- .Call(
           LGBM_DatasetGetSubset_R
           , ref_handle
-          , c(private$used_indices) # Adding c() fixes issue in R v3.5
+          , c(private$used_indices)
           , length(private$used_indices)
           , params_str
         )
@@ -475,8 +466,8 @@ Dataset <- R6::R6Class(
       # Check if attribute key is in the known attribute list
       if (!is.character(field_name) || length(field_name) != 1L || !field_name %in% .INFO_KEYS()) {
         stop(
-          "Dataset$get_field(): field_name must one of the following: "
-          , toString(sQuote(.INFO_KEYS()))
+          "Dataset$get_field(): field_name must be one of the following: "
+          , toString(sQuote(.INFO_KEYS(), q = FALSE))
         )
       }
 
@@ -526,8 +517,8 @@ Dataset <- R6::R6Class(
       # Check if attribute key is in the known attribute list
       if (!is.character(field_name) || length(field_name) != 1L || !field_name %in% .INFO_KEYS()) {
         stop(
-          "Dataset$set_field(): field_name must one of the following: "
-          , toString(sQuote(.INFO_KEYS()))
+          "Dataset$set_field(): field_name must be one of the following: "
+          , toString(sQuote(.INFO_KEYS(), q = FALSE))
         )
       }
 
@@ -608,7 +599,7 @@ Dataset <- R6::R6Class(
           # If updating failed but raw data is available, modify the params
           # on the R side and re-set ("deconstruct") the Dataset
           private$params <- new_params
-          self$finalize()
+          private$finalize()
         })
       }
       return(invisible(self))
@@ -649,7 +640,7 @@ Dataset <- R6::R6Class(
       private$categorical_feature <- categorical_feature
 
       # Finalize and return self
-      self$finalize()
+      private$finalize()
       return(invisible(self))
 
     },
@@ -681,7 +672,7 @@ Dataset <- R6::R6Class(
       private$reference <- reference
 
       # Finalize and return self
-      self$finalize()
+      private$finalize()
       return(invisible(self))
 
     },
@@ -712,6 +703,16 @@ Dataset <- R6::R6Class(
     used_indices = NULL,
     info = NULL,
     version = 0L,
+
+    # finalize() will free up the handles
+    finalize = function() {
+      .Call(
+        LGBM_DatasetFree_R
+        , private$handle
+      )
+      private$handle <- NULL
+      return(invisible(NULL))
+    },
 
     get_handle = function() {
 
@@ -749,7 +750,7 @@ Dataset <- R6::R6Class(
       private$predictor <- predictor
 
       # Finalize and return self
-      self$finalize()
+      private$finalize()
       return(invisible(self))
 
     }
@@ -1024,7 +1025,7 @@ dimnames.lgb.Dataset <- function(x) {
 
   # Check if invalid element list
   if (!identical(class(value), "list") || length(value) != 2L) {
-    stop("invalid ", sQuote("value"), " given: must be a list of two elements")
+    stop("invalid ", sQuote("value", q = FALSE), " given: must be a list of two elements")
   }
 
   # Check for unknown row names
@@ -1043,9 +1044,9 @@ dimnames.lgb.Dataset <- function(x) {
   if (ncol(x) != length(value[[2L]])) {
     stop(
       "can't assign "
-      , sQuote(length(value[[2L]]))
+      , sQuote(length(value[[2L]]), q = FALSE)
       , " colnames to an lgb.Dataset with "
-      , sQuote(ncol(x))
+      , sQuote(ncol(x), q = FALSE)
       , " columns"
     )
   }

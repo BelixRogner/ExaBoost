@@ -35,7 +35,6 @@ from .compat import (
     arrow_is_floating,
     arrow_is_integer,
     concat,
-    dt_DataTable,
     pa_Array,
     pa_chunked_array,
     pa_ChunkedArray,
@@ -116,7 +115,6 @@ _LGBM_TrainDataType = Union[
     Path,
     np.ndarray,
     pd_DataFrame,
-    dt_DataTable,
     scipy.sparse.spmatrix,
     "Sequence",
     List["Sequence"],
@@ -137,9 +135,17 @@ _LGBM_PredictDataType = Union[
     Path,
     np.ndarray,
     pd_DataFrame,
-    dt_DataTable,
     scipy.sparse.spmatrix,
     pa_Table,
+]
+_LGBM_PredictReturnType = Union[
+    np.ndarray,
+    scipy.sparse.spmatrix,
+    List[scipy.sparse.spmatrix],
+]
+_LGBM_PredictSparseReturnType = Union[
+    scipy.sparse.spmatrix,
+    List[scipy.sparse.spmatrix],
 ]
 _LGBM_WeightType = Union[
     List[float],
@@ -190,10 +196,12 @@ def _get_sample_count(total_nrow: int, params: str) -> int:
 
 
 def _np2d_to_np1d(mat: np.ndarray) -> Tuple[np.ndarray, int]:
+    dtype: "np.typing.DTypeLike"
     if mat.dtype in (np.float32, np.float64):
         dtype = mat.dtype
     else:
         dtype = np.float32
+    order: "Literal['C', 'F']"
     if mat.flags["F_CONTIGUOUS"]:
         order = "F"
         layout = _C_API_IS_COL_MAJOR
@@ -290,7 +298,7 @@ def _log_callback(msg: bytes) -> None:
 
 
 # connect the Python logger to logging in lib_lightgbm
-if not environ.get("LIGHTGBM_BUILD_DOC", False):
+if environ.get("LIGHTGBM_BUILD_DOC", "False") != "True":
     _LIB.LGBM_GetLastError.restype = ctypes.c_char_p
     callback = ctypes.CFUNCTYPE(None, ctypes.c_char_p)
     _LIB.callback = callback(_log_callback)  # type: ignore[attr-defined]
@@ -363,6 +371,7 @@ def _is_1d_collection(data: Any) -> bool:
 
 
 def _list_to_1d_numpy(
+    *,
     data: Any,
     dtype: "np.typing.DTypeLike",
     name: str,
@@ -405,7 +414,7 @@ def _is_pyarrow_array(data: Any) -> "TypeGuard[Union[pa_Array, pa_ChunkedArray]]
     return isinstance(data, (pa_Array, pa_ChunkedArray))
 
 
-def _is_pyarrow_table(data: Any) -> bool:
+def _is_pyarrow_table(data: Any) -> "TypeGuard[pa_Table]":
     """Check whether data is a PyArrow table."""
     return isinstance(data, pa_Table)
 
@@ -575,15 +584,6 @@ class LGBMDeprecationWarning(FutureWarning):
     """Custom deprecation warning."""
 
     pass
-
-
-def _emit_datatable_deprecation_warning() -> None:
-    msg = (
-        "Support for 'datatable' in LightGBM is deprecated, and will be removed in a future release. "
-        "To avoid this warning, convert 'datatable' inputs to a supported format "
-        "(for example, use the 'to_numpy()' method)."
-    )
-    warnings.warn(msg, category=LGBMDeprecationWarning, stacklevel=2)
 
 
 class _ConfigAliases:
@@ -852,7 +852,7 @@ def _data_from_pandas(
         for col, category in zip(cat_cols, pandas_categorical):
             if list(data[col].cat.categories) != list(category):
                 data[col] = data[col].cat.set_categories(category)
-    if len(cat_cols):  # cat_cols is list
+    if cat_cols:  # cat_cols is list
         data[cat_cols] = data[cat_cols].apply(lambda x: x.cat.codes).replace({-1: np.nan})
 
     # use cat cols from DataFrame
@@ -1107,12 +1107,12 @@ class _InnerPredictor:
         pred_contrib: bool = False,
         data_has_header: bool = False,
         validate_features: bool = False,
-    ) -> Union[np.ndarray, scipy.sparse.spmatrix, List[scipy.sparse.spmatrix]]:
+    ) -> _LGBM_PredictReturnType:
         """Predict logic.
 
         Parameters
         ----------
-        data : str, pathlib.Path, numpy array, pandas DataFrame, pyarrow Table, H2O DataTable's Frame (deprecated) or scipy.sparse
+        data : str, pathlib.Path, numpy array, pandas DataFrame, scipy.sparse or pyarrow Table
             Data source for prediction.
             If str or pathlib.Path, it represents the path to a text file (CSV, TSV, or LibSVM).
         start_iteration : int, optional (default=0)
@@ -1142,7 +1142,7 @@ class _InnerPredictor:
         """
         if isinstance(data, Dataset):
             raise TypeError("Cannot use Dataset instance for prediction, please use raw data instead")
-        elif isinstance(data, pd_DataFrame) and validate_features:
+        if isinstance(data, pd_DataFrame) and validate_features:
             data_names = [str(x) for x in data.columns]
             ptr_names = (ctypes.c_char_p * len(data_names))()
             ptr_names[:] = [x.encode("utf-8") for x in data_names]
@@ -1187,14 +1187,16 @@ class _InnerPredictor:
                 preds = np.loadtxt(f.name, dtype=np.float64)
                 nrow = preds.shape[0]
         elif isinstance(data, scipy.sparse.csr_matrix):
-            preds, nrow = self.__pred_for_csr(
+            # TODO: remove 'type: ignore[assignment]' when https://github.com/lightgbm-org/LightGBM/pull/6348 is resolved.
+            preds, nrow = self.__pred_for_csr(  # type: ignore[assignment]
                 csr=data,
                 start_iteration=start_iteration,
                 num_iteration=num_iteration,
                 predict_type=predict_type,
             )
         elif isinstance(data, scipy.sparse.csc_matrix):
-            preds, nrow = self.__pred_for_csc(
+            # TODO: remove 'type: ignore[assignment]' when https://github.com/lightgbm-org/LightGBM/pull/6348 is resolved.
+            preds, nrow = self.__pred_for_csc(  # type: ignore[assignment]
                 csc=data,
                 start_iteration=start_iteration,
                 num_iteration=num_iteration,
@@ -1225,21 +1227,14 @@ class _InnerPredictor:
                 num_iteration=num_iteration,
                 predict_type=predict_type,
             )
-        elif isinstance(data, dt_DataTable):
-            _emit_datatable_deprecation_warning()
-            preds, nrow = self.__pred_for_np2d(
-                mat=data.to_numpy(),
-                start_iteration=start_iteration,
-                num_iteration=num_iteration,
-                predict_type=predict_type,
-            )
         else:
             try:
                 _log_warning("Converting data to scipy sparse matrix.")
                 csr = scipy.sparse.csr_matrix(data)
             except BaseException as err:
                 raise TypeError(f"Cannot predict data for type {type(data).__name__}") from err
-            preds, nrow = self.__pred_for_csr(
+            # TODO: remove 'type: ignore[assignment]' when https://github.com/lightgbm-org/LightGBM/pull/6348 is resolved.
+            preds, nrow = self.__pred_for_csr(  # type: ignore[assignment]
                 csr=csr,
                 start_iteration=start_iteration,
                 num_iteration=num_iteration,
@@ -1257,6 +1252,7 @@ class _InnerPredictor:
 
     def __get_num_preds(
         self,
+        *,
         start_iteration: int,
         num_iteration: int,
         nrow: int,
@@ -1337,10 +1333,15 @@ class _InnerPredictor:
 
         nrow = mat.shape[0]
         if nrow > _MAX_INT32:
-            sections = np.arange(start=_MAX_INT32, stop=nrow, step=_MAX_INT32)
+            sections = np.arange(_MAX_INT32, nrow, _MAX_INT32)
             # __get_num_preds() cannot work with nrow > MAX_INT32, so calculate overall number of predictions piecemeal
             n_preds = [
-                self.__get_num_preds(start_iteration, num_iteration, i, predict_type)
+                self.__get_num_preds(
+                    start_iteration=start_iteration,
+                    num_iteration=num_iteration,
+                    nrow=int(i),
+                    predict_type=predict_type,
+                )
                 for i in np.diff([0] + list(sections) + [nrow])
             ]
             n_preds_sections = np.array([0] + n_preds, dtype=np.intp).cumsum()
@@ -1376,7 +1377,7 @@ class _InnerPredictor:
         indptr_type: int,
         data_type: int,
         is_csr: bool,
-    ) -> Union[List[scipy.sparse.csc_matrix], List[scipy.sparse.csr_matrix]]:
+    ) -> _LGBM_PredictSparseReturnType:
         # create numpy array from output arrays
         data_indices_len = out_shape[0]
         indptr_len = out_shape[1]
@@ -1484,7 +1485,7 @@ class _InnerPredictor:
         start_iteration: int,
         num_iteration: int,
         predict_type: int,
-    ) -> Tuple[Union[List[scipy.sparse.csc_matrix], List[scipy.sparse.csr_matrix]], int]:
+    ) -> Tuple[_LGBM_PredictSparseReturnType, int]:
         ptr_indptr, type_ptr_indptr, __ = _c_int_array(csr.indptr)
         ptr_data, type_ptr_data, _ = _c_float_array(csr.data)
         csr_indices = csr.indices.astype(np.int32, copy=False)
@@ -1542,7 +1543,7 @@ class _InnerPredictor:
         start_iteration: int,
         num_iteration: int,
         predict_type: int,
-    ) -> Tuple[np.ndarray, int]:
+    ) -> Tuple[_LGBM_PredictSparseReturnType, int]:
         """Predict for a CSR data."""
         if predict_type == _C_API_PREDICT_CONTRIB:
             return self.__inner_predict_csr_sparse(
@@ -1553,9 +1554,17 @@ class _InnerPredictor:
             )
         nrow = len(csr.indptr) - 1
         if nrow > _MAX_INT32:
-            sections = [0] + list(np.arange(start=_MAX_INT32, stop=nrow, step=_MAX_INT32)) + [nrow]
+            sections = [0] + list(np.arange(_MAX_INT32, nrow, _MAX_INT32)) + [nrow]
             # __get_num_preds() cannot work with nrow > MAX_INT32, so calculate overall number of predictions piecemeal
-            n_preds = [self.__get_num_preds(start_iteration, num_iteration, i, predict_type) for i in np.diff(sections)]
+            n_preds = [
+                self.__get_num_preds(
+                    start_iteration=start_iteration,
+                    num_iteration=num_iteration,
+                    nrow=int(i),
+                    predict_type=predict_type,
+                )
+                for i in np.diff(sections)
+            ]
             n_preds_sections = np.array([0] + n_preds, dtype=np.intp).cumsum()
             preds = np.empty(sum(n_preds), dtype=np.float64)
             for (start_idx, end_idx), (start_idx_pred, end_idx_pred) in zip(
@@ -1585,7 +1594,7 @@ class _InnerPredictor:
         start_iteration: int,
         num_iteration: int,
         predict_type: int,
-    ) -> Tuple[Union[List[scipy.sparse.csc_matrix], List[scipy.sparse.csr_matrix]], int]:
+    ) -> Tuple[_LGBM_PredictSparseReturnType, int]:
         ptr_indptr, type_ptr_indptr, __ = _c_int_array(csc.indptr)
         ptr_data, type_ptr_data, _ = _c_float_array(csc.data)
         csc_indices = csc.indices.astype(np.int32, copy=False)
@@ -1643,7 +1652,7 @@ class _InnerPredictor:
         start_iteration: int,
         num_iteration: int,
         predict_type: int,
-    ) -> Tuple[np.ndarray, int]:
+    ) -> Tuple[_LGBM_PredictSparseReturnType, int]:
         """Predict for a CSC data."""
         nrow = csc.shape[0]
         if nrow > _MAX_INT32:
@@ -1790,7 +1799,7 @@ class Dataset:
 
         Parameters
         ----------
-        data : str, pathlib.Path, numpy array, pandas DataFrame, H2O DataTable's Frame (deprecated), scipy.sparse, Sequence, list of Sequence, list of numpy array or pyarrow Table
+        data : str, pathlib.Path, numpy array, pandas DataFrame, scipy.sparse, Sequence, list of Sequence, list of numpy array or pyarrow Table
             Data source of Dataset.
             If str or pathlib.Path, it represents the path to a text file (CSV, TSV, or LibSVM) or a LightGBM Dataset binary file.
         label : list, numpy 1-D array, pandas Series / one-column DataFrame, pyarrow Array, pyarrow ChunkedArray or None, optional (default=None)
@@ -1853,7 +1862,7 @@ class Dataset:
         except AttributeError:
             pass
 
-    def _create_sample_indices(self, total_nrow: int) -> np.ndarray:
+    def _create_sample_indices(self, *, total_nrow: int) -> np.ndarray:
         """Get an array of randomly chosen indices from this ``Dataset``.
 
         Indices are sampled without replacement.
@@ -2180,29 +2189,26 @@ class Dataset:
                 )
             )
         elif isinstance(data, scipy.sparse.csr_matrix):
-            self.__init_from_csr(data, params_str, ref_dataset)
+            self.__init_from_csr(csr=data, params_str=params_str, ref_dataset=ref_dataset)
         elif isinstance(data, scipy.sparse.csc_matrix):
-            self.__init_from_csc(data, params_str, ref_dataset)
+            self.__init_from_csc(csc=data, params_str=params_str, ref_dataset=ref_dataset)
         elif isinstance(data, np.ndarray):
-            self.__init_from_np2d(data, params_str, ref_dataset)
+            self.__init_from_np2d(mat=data, params_str=params_str, ref_dataset=ref_dataset)
         elif _is_pyarrow_table(data):
-            self.__init_from_pyarrow_table(data, params_str, ref_dataset)
+            self.__init_from_pyarrow_table(table=data, params_str=params_str, ref_dataset=ref_dataset)
         elif isinstance(data, list) and len(data) > 0:
             if _is_list_of_numpy_arrays(data):
-                self.__init_from_list_np2d(data, params_str, ref_dataset)
+                self.__init_from_list_np2d(mats=data, params_str=params_str, ref_dataset=ref_dataset)
             elif _is_list_of_sequences(data):
-                self.__init_from_seqs(data, ref_dataset)
+                self.__init_from_seqs(seqs=data, ref_dataset=ref_dataset)
             else:
                 raise TypeError("Data list can only be of ndarray or Sequence")
         elif isinstance(data, Sequence):
-            self.__init_from_seqs([data], ref_dataset)
-        elif isinstance(data, dt_DataTable):
-            _emit_datatable_deprecation_warning()
-            self.__init_from_np2d(data.to_numpy(), params_str, ref_dataset)
+            self.__init_from_seqs(seqs=[data], ref_dataset=ref_dataset)
         else:
             try:
                 csr = scipy.sparse.csr_matrix(data)
-                self.__init_from_csr(csr, params_str, ref_dataset)
+                self.__init_from_csr(csr=csr, params_str=params_str, ref_dataset=ref_dataset)
             except BaseException as err:
                 raise TypeError(f"Cannot initialize Dataset from {type(data).__name__}") from err
         if label is not None:
@@ -2241,7 +2247,7 @@ class Dataset:
             row = seq[id_in_seq]
             yield row if row.flags["OWNDATA"] else row.copy()
 
-    def __sample(self, seqs: List[Sequence], total_nrow: int) -> Tuple[List[np.ndarray], List[np.ndarray]]:
+    def __sample(self, *, seqs: List[Sequence], total_nrow: int) -> Tuple[List[np.ndarray], List[np.ndarray]]:
         """Sample data from seqs.
 
         Mimics behavior in c_api.cpp:LGBM_DatasetCreateFromMats()
@@ -2250,7 +2256,7 @@ class Dataset:
         -------
             sampled_rows, sampled_row_indices
         """
-        indices = self._create_sample_indices(total_nrow)
+        indices = self._create_sample_indices(total_nrow=total_nrow)
 
         # Select sampled rows, transpose to column order.
         sampled = np.array(list(self._yield_row_from_seqlist(seqs, indices)))
@@ -2271,6 +2277,7 @@ class Dataset:
 
     def __init_from_seqs(
         self,
+        *,
         seqs: List[Sequence],
         ref_dataset: Optional[_DatasetHandle],
     ) -> "Dataset":
@@ -2291,7 +2298,7 @@ class Dataset:
             param_str = _param_dict_to_str(self.get_params())
             sample_cnt = _get_sample_count(total_nrow, param_str)
 
-            sample_data, col_indices = self.__sample(seqs, total_nrow)
+            sample_data, col_indices = self.__sample(seqs=seqs, total_nrow=total_nrow)
             self._init_from_sample(sample_data, col_indices, sample_cnt, total_nrow)
 
         for seq in seqs:
@@ -2304,6 +2311,7 @@ class Dataset:
 
     def __init_from_np2d(
         self,
+        *,
         mat: np.ndarray,
         params_str: str,
         ref_dataset: Optional[_DatasetHandle],
@@ -2331,6 +2339,7 @@ class Dataset:
 
     def __init_from_list_np2d(
         self,
+        *,
         mats: List[np.ndarray],
         params_str: str,
         ref_dataset: Optional[_DatasetHandle],
@@ -2385,6 +2394,7 @@ class Dataset:
 
     def __init_from_csr(
         self,
+        *,
         csr: scipy.sparse.csr_matrix,
         params_str: str,
         ref_dataset: Optional[_DatasetHandle],
@@ -2419,6 +2429,7 @@ class Dataset:
 
     def __init_from_csc(
         self,
+        *,
         csc: scipy.sparse.csc_matrix,
         params_str: str,
         ref_dataset: Optional[_DatasetHandle],
@@ -2453,6 +2464,7 @@ class Dataset:
 
     def __init_from_pyarrow_table(
         self,
+        *,
         table: pa_Table,
         params_str: str,
         ref_dataset: Optional[_DatasetHandle],
@@ -2482,6 +2494,7 @@ class Dataset:
 
     @staticmethod
     def _compare_params_for_warning(
+        *,
         params: Dict[str, Any],
         other_params: Dict[str, Any],
         ignore_keys: Set[str],
@@ -2551,7 +2564,11 @@ class Dataset:
                     )
                 else:
                     # construct subset
-                    used_indices = _list_to_1d_numpy(self.used_indices, dtype=np.int32, name="used_indices")
+                    used_indices = _list_to_1d_numpy(
+                        data=self.used_indices,
+                        dtype=np.int32,
+                        name="used_indices",
+                    )
                     assert used_indices.flags.c_contiguous
                     if self.reference.group is not None:
                         group_info = np.array(self.reference.group).astype(np.int32, copy=False)
@@ -2619,7 +2636,7 @@ class Dataset:
 
         Parameters
         ----------
-        data : str, pathlib.Path, numpy array, pandas DataFrame, H2O DataTable's Frame (deprecated), scipy.sparse, Sequence, list of Sequence or list of numpy array
+        data : str, pathlib.Path, numpy array, pandas DataFrame, scipy.sparse, Sequence, list of Sequence, list of numpy array or pyarrow Table
             Data source of Dataset.
             If str or pathlib.Path, it represents the path to a text file (CSV, TSV, or LibSVM) or a LightGBM Dataset binary file.
         label : list, numpy 1-D array, pandas Series / one-column DataFrame, pyarrow Array, pyarrow ChunkedArray or None, optional (default=None)
@@ -2764,7 +2781,7 @@ class Dataset:
         ----------
         field_name : str
             The field name of the information.
-        data : list, list of lists (for multi-class task), numpy array, pandas Series, pandas DataFrame (for multi-class task), pyarrow Array, pyarrow ChunkedArray or None
+        data : list, list of lists (for multi-class task), numpy array, pandas Series, pandas DataFrame (for multi-class task), pyarrow Array, pyarrow ChunkedArray, pyarrow Table (for multi-class task) or None
             The data to be set.
 
         Returns
@@ -2819,9 +2836,9 @@ class Dataset:
         if field_name == "init_score":
             dtype = np.float64
             if _is_1d_collection(data):
-                data = _list_to_1d_numpy(data, dtype=dtype, name=field_name)
+                data = _list_to_1d_numpy(data=data, dtype=dtype, name=field_name)
             elif _is_2d_collection(data):
-                data = _data_to_2d_numpy(data, dtype=dtype, name=field_name)
+                data = _data_to_2d_numpy(data=data, dtype=dtype, name=field_name)
                 data = data.ravel(order="F")
             else:
                 raise TypeError(
@@ -2833,7 +2850,7 @@ class Dataset:
                 dtype = np.int32
             else:
                 dtype = np.float32
-            data = _list_to_1d_numpy(data, dtype=dtype, name=field_name)
+            data = _list_to_1d_numpy(data=data, dtype=dtype, name=field_name)
 
         ptr_data: Union[_ctypes_float_ptr, _ctypes_int_ptr]
         if data.dtype == np.float32 or data.dtype == np.float64:
@@ -3074,7 +3091,7 @@ class Dataset:
             elif _is_pyarrow_array(label):
                 label_array = label
             else:
-                label_array = _list_to_1d_numpy(label, dtype=np.float32, name="label")
+                label_array = _list_to_1d_numpy(data=label, dtype=np.float32, name="label")
             self.set_field("label", label_array)
             self.label = self.get_field("label")  # original values can be modified at cpp side
         return self
@@ -3098,7 +3115,8 @@ class Dataset:
         # Check if the weight contains values other than one
         if weight is not None:
             if _is_pyarrow_array(weight):
-                if pa_compute.all(pa_compute.equal(weight, 1)).as_py():
+                # TODO: remove 'type: ignore[attr-defined]' when https://github.com/apache/arrow/issues/49831 is resolved.
+                if pa_compute.all(pa_compute.equal(weight, 1)).as_py():  # type: ignore[attr-defined]
                     weight = None
             elif np.all(weight == 1):
                 weight = None
@@ -3107,7 +3125,7 @@ class Dataset:
         # Set field
         if self._handle is not None and weight is not None:
             if not _is_pyarrow_array(weight):
-                weight = _list_to_1d_numpy(weight, dtype=np.float32, name="weight")
+                weight = _list_to_1d_numpy(data=weight, dtype=np.float32, name="weight")
             self.set_field("weight", weight)
             self.weight = self.get_field("weight")  # original values can be modified at cpp side
         return self
@@ -3157,7 +3175,7 @@ class Dataset:
         self.group = group
         if self._handle is not None and group is not None:
             if not _is_pyarrow_array(group):
-                group = _list_to_1d_numpy(group, dtype=np.int32, name="group")
+                group = _list_to_1d_numpy(data=group, dtype=np.int32, name="group")
             self.set_field("group", group)
             # original values can be modified at cpp side
             constructed_group = self.get_field("group")
@@ -3183,7 +3201,7 @@ class Dataset:
         """
         self.position = position
         if self._handle is not None and position is not None:
-            position = _list_to_1d_numpy(position, dtype=np.int32, name="position")
+            position = _list_to_1d_numpy(data=position, dtype=np.int32, name="position")
             self.set_field("position", position)
         return self
 
@@ -3237,7 +3255,7 @@ class Dataset:
 
         Returns
         -------
-        label : list, numpy 1-D array, pandas Series / one-column DataFrame or None
+        label : list, numpy 1-D array, pandas Series / one-column DataFrame, pyarrow Array, pyarrow ChunkedArray or None
             The label information from the Dataset.
             For a constructed ``Dataset``, this will only return a numpy array.
         """
@@ -3250,7 +3268,7 @@ class Dataset:
 
         Returns
         -------
-        weight : list, numpy 1-D array, pandas Series or None
+        weight : list, numpy 1-D array, pandas Series, pyarrow Array, pyarrow ChunkedArray or None
             Weight for each data point from the Dataset. Weights should be non-negative.
             For a constructed ``Dataset``, this will only return ``None`` or a numpy array.
         """
@@ -3263,7 +3281,7 @@ class Dataset:
 
         Returns
         -------
-        init_score : list, list of lists (for multi-class task), numpy array, pandas Series, pandas DataFrame (for multi-class task), or None
+        init_score : list, list of lists (for multi-class task), numpy array, pandas Series, pandas DataFrame (for multi-class task), pyarrow Array, pyarrow ChunkedArray, pyarrow Table (for multi-class task) or None
             Init score of Booster.
             For a constructed ``Dataset``, this will only return ``None`` or a numpy array.
         """
@@ -3276,7 +3294,7 @@ class Dataset:
 
         Returns
         -------
-        data : str, pathlib.Path, numpy array, pandas DataFrame, H2O DataTable's Frame (deprecated), scipy.sparse, Sequence, list of Sequence or list of numpy array or None
+        data : str, pathlib.Path, numpy array, pandas DataFrame, scipy.sparse, Sequence, list of Sequence, list of numpy array, pyarrow Table or None
             Raw data used in the Dataset construction.
         """
         if self._handle is None:
@@ -3288,11 +3306,10 @@ class Dataset:
                     self.data = self.data[self.used_indices, :]
                 elif isinstance(self.data, pd_DataFrame):
                     self.data = self.data.iloc[self.used_indices].copy()
-                elif isinstance(self.data, dt_DataTable):
-                    _emit_datatable_deprecation_warning()
-                    self.data = self.data[self.used_indices, :]
                 elif isinstance(self.data, Sequence):
                     self.data = self.data[self.used_indices]
+                elif isinstance(self.data, pa_Table):
+                    self.data = self.data.take(self.used_indices)
                 elif _is_list_of_sequences(self.data) and len(self.data) > 0:
                     self.data = np.array(list(self._yield_row_from_seqlist(self.data, self.used_indices)))
                 else:
@@ -3312,7 +3329,7 @@ class Dataset:
 
         Returns
         -------
-        group : list, numpy 1-D array, pandas Series or None
+        group : list, numpy 1-D array, pandas Series, pyarrow Array, pyarrow ChunkedArray or None
             Group/query data.
             Only used in the learning-to-rank task.
             sum(group) = n_samples.
@@ -3477,9 +3494,6 @@ class Dataset:
                     self.data = np.hstack((self.data, other.data.toarray()))
                 elif isinstance(other.data, pd_DataFrame):
                     self.data = np.hstack((self.data, other.data.values))
-                elif isinstance(other.data, dt_DataTable):
-                    _emit_datatable_deprecation_warning()
-                    self.data = np.hstack((self.data, other.data.to_numpy()))
                 else:
                     self.data = None
             elif isinstance(self.data, scipy.sparse.spmatrix):
@@ -3488,9 +3502,6 @@ class Dataset:
                     self.data = scipy.sparse.hstack((self.data, other.data), format=sparse_format)
                 elif isinstance(other.data, pd_DataFrame):
                     self.data = scipy.sparse.hstack((self.data, other.data.values), format=sparse_format)
-                elif isinstance(other.data, dt_DataTable):
-                    _emit_datatable_deprecation_warning()
-                    self.data = scipy.sparse.hstack((self.data, other.data.to_numpy()), format=sparse_format)
                 else:
                     self.data = None
             elif isinstance(self.data, pd_DataFrame):
@@ -3506,21 +3517,6 @@ class Dataset:
                     self.data = concat((self.data, pd_DataFrame(other.data.toarray())), axis=1, ignore_index=True)
                 elif isinstance(other.data, pd_DataFrame):
                     self.data = concat((self.data, other.data), axis=1, ignore_index=True)
-                elif isinstance(other.data, dt_DataTable):
-                    _emit_datatable_deprecation_warning()
-                    self.data = concat((self.data, pd_DataFrame(other.data.to_numpy())), axis=1, ignore_index=True)
-                else:
-                    self.data = None
-            elif isinstance(self.data, dt_DataTable):
-                _emit_datatable_deprecation_warning()
-                if isinstance(other.data, np.ndarray):
-                    self.data = dt_DataTable(np.hstack((self.data.to_numpy(), other.data)))
-                elif isinstance(other.data, scipy.sparse.spmatrix):
-                    self.data = dt_DataTable(np.hstack((self.data.to_numpy(), other.data.toarray())))
-                elif isinstance(other.data, pd_DataFrame):
-                    self.data = dt_DataTable(np.hstack((self.data.to_numpy(), other.data.values)))
-                elif isinstance(other.data, dt_DataTable):
-                    self.data = dt_DataTable(np.hstack((self.data.to_numpy(), other.data.to_numpy())))
                 else:
                     self.data = None
             else:
@@ -3715,6 +3711,9 @@ class Booster:
             params = self._get_loaded_param()
         elif model_str is not None:
             self.model_from_string(model_str)
+            if params:
+                _log_warning("Ignoring params argument, using parameters from model string.")
+            params = self._get_loaded_param()
         else:
             raise TypeError(
                 "Need at least one training dataset or model file or model string to create Booster instance"
@@ -3919,6 +3918,7 @@ class Booster:
                 return f"{tree_num}{node_type}{node_num}"
 
             def _get_split_feature(
+                *,
                 tree: Dict[str, Any],
                 feature_names: Optional[List[str]],
             ) -> Optional[str]:
@@ -3942,7 +3942,7 @@ class Booster:
             node["left_child"] = None
             node["right_child"] = None
             node["parent_index"] = parent_node
-            node["split_feature"] = _get_split_feature(tree, feature_names)
+            node["split_feature"] = _get_split_feature(tree=tree, feature_names=feature_names)
             node["split_gain"] = None
             node["threshold"] = None
             node["decision_type"] = None
@@ -4124,8 +4124,13 @@ class Booster:
 
         Returns
         -------
-        is_finished : bool
-            Whether the update was successfully finished.
+        produced_empty_tree : bool
+            ``True`` if the tree(s) produced by this iteration did not have any splits.
+            This usually means that training is "finished" (calling ``update()`` again
+            will not change the model's predictions). However, that is not always the
+            case. For example, if you have added any randomness (like column sampling by
+            setting ``feature_fraction_bynode < 1.0``), it is possible that another call
+            to ``update()`` would produce a non-empty tree.
         """
         # need reset training data
         if train_set is None and self.train_set_version != self.train_set.version:
@@ -4147,26 +4152,27 @@ class Booster:
             )
             self.__inner_predict_buffer[0] = None
             self.train_set_version = self.train_set.version
-        is_finished = ctypes.c_int(0)
+        produced_empty_tree = ctypes.c_int(0)
         if fobj is None:
             if self.__set_objective_to_none:
                 raise LightGBMError("Cannot update due to null objective function.")
             _safe_call(
                 _LIB.LGBM_BoosterUpdateOneIter(
                     self._handle,
-                    ctypes.byref(is_finished),
+                    ctypes.byref(produced_empty_tree),
                 )
             )
             self.__is_predicted_cur_iter = [False for _ in range(self.__num_dataset)]
-            return is_finished.value == 1
+            return produced_empty_tree.value == 1
         else:
             if not self.__set_objective_to_none:
                 self.reset_parameter({"objective": "none"}).__set_objective_to_none = True
-            grad, hess = fobj(self.__inner_predict(0), self.train_set)
-            return self.__boost(grad, hess)
+            grad, hess = fobj(self.__inner_predict(data_idx=0), self.train_set)
+            return self.__boost(grad=grad, hess=hess)
 
     def __boost(
         self,
+        *,
         grad: np.ndarray,
         hess: np.ndarray,
     ) -> bool:
@@ -4190,14 +4196,19 @@ class Booster:
 
         Returns
         -------
-        is_finished : bool
-            Whether the boost was successfully finished.
+        produced_empty_tree : bool
+            ``True`` if the tree(s) produced by this iteration did not have any splits.
+            This usually means that training is "finished" (calling ``__boost()`` again
+            will not change the model's predictions). However, that is not always the
+            case. For example, if you have added any randomness (like column sampling by
+            setting ``feature_fraction_bynode < 1.0``), it is possible that another call
+            to ``__boost()`` would produce a non-empty tree.
         """
         if self.__num_class > 1:
             grad = grad.ravel(order="F")
             hess = hess.ravel(order="F")
-        grad = _list_to_1d_numpy(grad, dtype=np.float32, name="gradient")
-        hess = _list_to_1d_numpy(hess, dtype=np.float32, name="hessian")
+        grad = _list_to_1d_numpy(data=grad, dtype=np.float32, name="gradient")
+        hess = _list_to_1d_numpy(data=hess, dtype=np.float32, name="hessian")
         assert grad.flags.c_contiguous
         assert hess.flags.c_contiguous
         if len(grad) != len(hess):
@@ -4209,17 +4220,17 @@ class Booster:
                 f"don't match training data length ({num_train_data}) * "
                 f"number of models per one iteration ({self.__num_class})"
             )
-        is_finished = ctypes.c_int(0)
+        produced_empty_tree = ctypes.c_int(0)
         _safe_call(
             _LIB.LGBM_BoosterUpdateOneIterCustom(
                 self._handle,
                 grad.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
                 hess.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
-                ctypes.byref(is_finished),
+                ctypes.byref(produced_empty_tree),
             )
         )
         self.__is_predicted_cur_iter = [False for _ in range(self.__num_dataset)]
-        return is_finished.value == 1
+        return produced_empty_tree.value == 1
 
     def rollback_one_iter(self) -> "Booster":
         """Rollback one iteration.
@@ -4335,7 +4346,7 @@ class Booster:
         feval : callable, list of callable, or None, optional (default=None)
             Customized evaluation function.
             Each evaluation function should accept two parameters: preds, eval_data,
-            and return (eval_name, eval_result, is_higher_better) or list of such tuples.
+            and return (metric_name, metric_value, maximize) or list of such tuples.
 
                 preds : numpy 1-D array or numpy 2-D array (for multi-class task)
                     The predicted values.
@@ -4344,17 +4355,17 @@ class Booster:
                     e.g. they are raw margin instead of probability of positive class for binary task in this case.
                 eval_data : Dataset
                     A ``Dataset`` to evaluate.
-                eval_name : str
-                    The name of evaluation function (without whitespace).
-                eval_result : float
-                    The eval result.
-                is_higher_better : bool
-                    Is eval result higher better, e.g. AUC is ``is_higher_better``.
+                metric_name : str
+                    Unique identifier for the metric (e.g. "custom_adjusted_mse").
+                metric_value : float
+                    Value of the evaluation metric.
+                maximize : bool
+                    Are higher values better? e.g. ``True`` for AUC and ``False`` for binary error.
 
         Returns
         -------
         result : list
-            List with (dataset_name, eval_name, eval_result, is_higher_better) tuples.
+            List with (dataset_name, metric_name, metric_value, maximize) tuples.
         """
         if not isinstance(data, Dataset):
             raise TypeError("Can only eval for Dataset instance")
@@ -4371,7 +4382,7 @@ class Booster:
             self.add_valid(data, name)
             data_idx = self.__num_dataset - 1
 
-        return self.__inner_eval(name, data_idx, feval)
+        return self.__inner_eval(data_name=name, data_idx=data_idx, feval=feval)
 
     def eval_train(
         self,
@@ -4384,7 +4395,7 @@ class Booster:
         feval : callable, list of callable, or None, optional (default=None)
             Customized evaluation function.
             Each evaluation function should accept two parameters: preds, eval_data,
-            and return (eval_name, eval_result, is_higher_better) or list of such tuples.
+            and return (metric_name, metric_value, maximize) or list of such tuples.
 
                 preds : numpy 1-D array or numpy 2-D array (for multi-class task)
                     The predicted values.
@@ -4393,19 +4404,19 @@ class Booster:
                     e.g. they are raw margin instead of probability of positive class for binary task in this case.
                 eval_data : Dataset
                     The training dataset.
-                eval_name : str
-                    The name of evaluation function (without whitespace).
-                eval_result : float
-                    The eval result.
-                is_higher_better : bool
-                    Is eval result higher better, e.g. AUC is ``is_higher_better``.
+                metric_name : str
+                    Unique identifier for the metric (e.g. "custom_adjusted_mse").
+                metric_value : float
+                    Value of the evaluation metric.
+                maximize : bool
+                    Are higher values better? e.g. ``True`` for AUC and ``False`` for binary error.
 
         Returns
         -------
         result : list
-            List with (train_dataset_name, eval_name, eval_result, is_higher_better) tuples.
+            List with (train_dataset_name, metric_name, metric_value, maximize) tuples.
         """
-        return self.__inner_eval(self._train_data_name, 0, feval)
+        return self.__inner_eval(data_name=self._train_data_name, data_idx=0, feval=feval)
 
     def eval_valid(
         self,
@@ -4418,7 +4429,7 @@ class Booster:
         feval : callable, list of callable, or None, optional (default=None)
             Customized evaluation function.
             Each evaluation function should accept two parameters: preds, eval_data,
-            and return (eval_name, eval_result, is_higher_better) or list of such tuples.
+            and return (metric_name, metric_value, maximize) or list of such tuples.
 
                 preds : numpy 1-D array or numpy 2-D array (for multi-class task)
                     The predicted values.
@@ -4427,22 +4438,22 @@ class Booster:
                     e.g. they are raw margin instead of probability of positive class for binary task in this case.
                 eval_data : Dataset
                     The validation dataset.
-                eval_name : str
-                    The name of evaluation function (without whitespace).
-                eval_result : float
-                    The eval result.
-                is_higher_better : bool
-                    Is eval result higher better, e.g. AUC is ``is_higher_better``.
+                metric_name : str
+                    Unique identifier for the metric (e.g. "custom_adjusted_mse").
+                metric_value : float
+                    Value of the evaluation metric.
+                maximize : bool
+                    Are higher values better? e.g. ``True`` for AUC and ``False`` for binary error.
 
         Returns
         -------
         result : list
-            List with (validation_dataset_name, eval_name, eval_result, is_higher_better) tuples.
+            List with (validation_dataset_name, metric_name, metric_value, maximize) tuples.
         """
         return [
             item
             for i in range(1, self.__num_dataset)
-            for item in self.__inner_eval(self.name_valid_sets[i - 1], i, feval)
+            for item in self.__inner_eval(data_name=self.name_valid_sets[i - 1], data_idx=i, feval=feval)
         ]
 
     def save_model(
@@ -4709,12 +4720,12 @@ class Booster:
         data_has_header: bool = False,
         validate_features: bool = False,
         **kwargs: Any,
-    ) -> Union[np.ndarray, scipy.sparse.spmatrix, List[scipy.sparse.spmatrix]]:
+    ) -> _LGBM_PredictReturnType:
         """Make a prediction.
 
         Parameters
         ----------
-        data : str, pathlib.Path, numpy array, pandas DataFrame, pyarrow Table, H2O DataTable's Frame (deprecated) or scipy.sparse
+        data : str, pathlib.Path, numpy array, pandas DataFrame, scipy.sparse or pyarrow Table
             Data source for prediction.
             If str or pathlib.Path, it represents the path to a text file (CSV, TSV, or LibSVM).
         start_iteration : int, optional (default=0)
@@ -4795,7 +4806,7 @@ class Booster:
 
         Parameters
         ----------
-        data : str, pathlib.Path, numpy array, pandas DataFrame, H2O DataTable's Frame (deprecated), scipy.sparse, Sequence, list of Sequence or list of numpy array
+        data : str, pathlib.Path, numpy array, pandas DataFrame, scipy.sparse, Sequence, list of Sequence, list of numpy array or pyarrow Table
             Data source for refit.
             If str or pathlib.Path, it represents the path to a text file (CSV, TSV, or LibSVM).
         label : list, numpy 1-D array, pandas Series / one-column DataFrame, pyarrow Array or pyarrow ChunkedArray
@@ -4897,6 +4908,31 @@ class Booster:
         )
         new_params["linear_tree"] = bool(out_is_linear.value)
         new_params.update(dataset_params)
+
+        # 'categorical_feature' can end up in self.params when a Booster
+        # is created from a model string or file... pre-process to ensure it's passed
+        # via a keyword argument to the Dataset constructor instead of 'params'.
+        new_params = _choose_param_value(
+            main_param_name="categorical_feature",
+            params=new_params,
+            default_value=None,
+        )
+        cat_features_from_params = new_params.pop("categorical_feature")
+
+        # reconcile params and keyword argument
+        if cat_features_from_params:
+            if categorical_feature == "auto":
+                categorical_feature = cat_features_from_params
+            elif cat_features_from_params != categorical_feature:
+                error_msg = (
+                    "'categorical_feature' value passed to Booster.refit() is different from  "
+                    "'categorical_feature' value found in Booster.params. "
+                    "Preferring the value passed via keyword argument. "
+                    "Using refit() to change which columns are treated as categorical is not supported. "
+                    "If you have a valid use case for this, please open an issue at https://github.com/lightgbm-org/LightGBM/issues."
+                )
+                raise LightGBMError(error_msg)
+
         train_set = Dataset(
             data=data,
             label=label,
@@ -5141,8 +5177,7 @@ class Booster:
                 if split_feature == feature:
                     if isinstance(root["threshold"], str):
                         raise LightGBMError("Cannot compute split value histogram for the categorical feature")
-                    else:
-                        values.append(root["threshold"])
+                    values.append(root["threshold"])
                 add(root["left_child"])
                 add(root["right_child"])
 
@@ -5169,6 +5204,7 @@ class Booster:
 
     def __inner_eval(
         self,
+        *,
         data_name: str,
         data_idx: int,
         feval: Optional[Union[_LGBM_CustomEvalFunction, List[_LGBM_CustomEvalFunction]]],
@@ -5203,16 +5239,16 @@ class Booster:
             for eval_function in feval:
                 if eval_function is None:
                     continue
-                feval_ret = eval_function(self.__inner_predict(data_idx), cur_data)
+                feval_ret = eval_function(self.__inner_predict(data_idx=data_idx), cur_data)
                 if isinstance(feval_ret, list):
-                    for eval_name, val, is_higher_better in feval_ret:
-                        ret.append((data_name, eval_name, val, is_higher_better))
+                    for metric_name, metric_value, maximize in feval_ret:
+                        ret.append((data_name, metric_name, metric_value, maximize))
                 else:
-                    eval_name, val, is_higher_better = feval_ret
-                    ret.append((data_name, eval_name, val, is_higher_better))
+                    metric_name, metric_value, maximize = feval_ret
+                    ret.append((data_name, metric_name, metric_value, maximize))
         return ret
 
-    def __inner_predict(self, data_idx: int) -> np.ndarray:
+    def __inner_predict(self, *, data_idx: int) -> np.ndarray:
         """Predict for training and validation dataset."""
         if data_idx >= self.__num_dataset:
             raise ValueError("Data_idx should be smaller than number of dataset")
