@@ -19,8 +19,6 @@ What's different from upstream LightGBM
 - **Host-pinned bin-matrix fallback** so wide datasets that don't fit twice in GPU memory still train.
 - **Open contribution policy.** See [CONTRIBUTING.md](CONTRIBUTING.md). Human and AI contributors are welcome on the same terms.
 
-For the technical detail behind the CUDA changes that drove this fork's creation, see [NUMERAI-CUDA-FORK.md](NUMERAI-CUDA-FORK.md).
-
 Install / build
 ---------------
 
@@ -41,7 +39,7 @@ Then install the Python package using upstream's `python-package/build-python.sh
 Documentation
 -------------
 
-API documentation is currently the upstream LightGBM docs at <https://lightgbm.readthedocs.io/>. ExaBoost-specific deltas are described in this repo's per-PR descriptions and in [NUMERAI-CUDA-FORK.md](NUMERAI-CUDA-FORK.md). Project-specific documentation is on the roadmap.
+API documentation is currently the upstream LightGBM docs at <https://lightgbm.readthedocs.io/>. ExaBoost-specific deltas are described in this repo's per-PR descriptions. Project-specific documentation is on the roadmap.
 
 License
 -------
