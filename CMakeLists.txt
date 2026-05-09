@@ -223,7 +223,13 @@ if(USE_CUDA)
 
     # reference for mapping of CUDA toolkit component versions to supported architectures ("compute capabilities"):
     # https://en.wikipedia.org/wiki/CUDA#GPUs_supported
-    set(CUDA_ARCHS "60" "61" "62" "70" "75")
+    # CUDA 13.0 removed offline-compilation support for Maxwell (sm_50/52/53), Pascal (sm_60/61/62)
+    # and Volta (sm_70/72). sm_75 (Turing) is the lowest still-supported architecture.
+    if(CUDAToolkit_VERSION VERSION_LESS "13.0")
+        set(CUDA_ARCHS "60" "61" "62" "70" "75")
+    else()
+        set(CUDA_ARCHS "75")
+    endif()
     if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL "11.0")
         list(APPEND CUDA_ARCHS "80")
     endif()
