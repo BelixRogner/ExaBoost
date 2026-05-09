@@ -90,6 +90,10 @@ int CUDATree::Split(const int leaf_index,
            const CUDASplitInfo* cuda_split_info) {
   LaunchSplitKernel(leaf_index, real_feature_index, real_threshold, missing_type, cuda_split_info);
   RecordBranchFeatures(leaf_index, num_leaves_, real_feature_index);
+  // mirror CPU Tree::Split: keep host-side leaf_depth_ in sync so leaf_depth(idx)
+  // returns the correct value for max_depth and other host-side checks.
+  leaf_depth_[num_leaves_] = leaf_depth_[leaf_index] + 1;
+  leaf_depth_[leaf_index]++;
   ++num_leaves_;
   return num_leaves_ - 1;
 }
@@ -110,6 +114,9 @@ int CUDATree::SplitCategorical(const int leaf_index,
   ++num_leaves_;
   ++num_cat_;
   RecordBranchFeatures(leaf_index, num_leaves_, real_feature_index);
+  // mirror CPU Tree::Split: keep host-side leaf_depth_ in sync.
+  leaf_depth_[num_leaves_ - 1] = leaf_depth_[leaf_index] + 1;
+  leaf_depth_[leaf_index]++;
   return num_leaves_ - 1;
 }
 

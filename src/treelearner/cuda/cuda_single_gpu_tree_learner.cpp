@@ -274,7 +274,10 @@ Tree* CUDASingleGPUTreeLearner::Train(const score_t* gradients,
         cuda_gradient_discretizer_->grad_scale_ptr(),
         cuda_gradient_discretizer_->hess_scale_ptr(),
         smaller_leaf_num_bits_bin,
-        larger_leaf_num_bits_bin);
+        larger_leaf_num_bits_bin,
+        config_->max_depth <= 0 || tree->leaf_depth(smaller_leaf_index_) < config_->max_depth,
+        larger_leaf_index_ < 0 || config_->max_depth <= 0 ||
+          tree->leaf_depth(larger_leaf_index_) < config_->max_depth);
     } else {
       cuda_best_split_finder_->FindBestSplitsForLeaf(
         cuda_smaller_leaf_splits_->GetCUDAStruct(),
@@ -282,7 +285,10 @@ Tree* CUDASingleGPUTreeLearner::Train(const score_t* gradients,
         smaller_leaf_index_, larger_leaf_index_,
         global_num_data_in_smaller_leaf, global_num_data_in_larger_leaf,
         sum_hessians_in_smaller_leaf, sum_hessians_in_larger_leaf,
-        nullptr, nullptr, 0, 0);
+        nullptr, nullptr, 0, 0,
+        config_->max_depth <= 0 || tree->leaf_depth(smaller_leaf_index_) < config_->max_depth,
+        larger_leaf_index_ < 0 || config_->max_depth <= 0 ||
+          tree->leaf_depth(larger_leaf_index_) < config_->max_depth);
     }
 
     global_timer.Stop("CUDASingleGPUTreeLearner::FindBestSplitsForLeaf");
