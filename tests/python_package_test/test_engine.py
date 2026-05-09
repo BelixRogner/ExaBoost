@@ -4704,6 +4704,43 @@ def test_quantized_training():
     assert quant_rmse < rmse + 6.0
 
 
+@pytest.mark.skipif(getenv("TASK", "") != "cuda", reason="CUDA-only regression test")
+def test_quantized_training_cuda_matches_cpu():
+    # Without all three of the fixes in this commit's parent, CUDA quantized
+    # diverges from CPU at num_leaves > 4 (MSE/var blew up to >10000 at
+    # num_leaves=31). Each fix is needed; the bugs have compensating distortions
+    # so partial fixes leave the CUDA fit visibly wrong.
+    rng = np.random.default_rng(0)
+    n = 2000
+    X = rng.uniform(size=(n, 30)).astype(np.float32)
+    y = rng.uniform(size=n).astype(np.float32)
+    common = {
+        "objective": "regression",
+        "use_quantized_grad": True,
+        "num_grad_quant_bins": 30,
+        "verbose": -1,
+        "seed": 0,
+    }
+    for num_leaves in (8, 16, 31):
+        cpu_pred = lgb.train(
+            dict(common, num_leaves=num_leaves),
+            lgb.Dataset(X, label=y),
+            num_boost_round=10,
+        ).predict(X)
+        cuda_pred = lgb.train(
+            dict(common, num_leaves=num_leaves, device_type="cuda"),
+            lgb.Dataset(X, label=y, params={"device": "cuda"}),
+            num_boost_round=10,
+        ).predict(X)
+        np.testing.assert_allclose(
+            cuda_pred,
+            cpu_pred,
+            atol=1e-3,
+            rtol=1e-3,
+            err_msg=f"CUDA quantized predictions diverge from CPU at num_leaves={num_leaves}",
+        )
+
+
 def test_bagging_by_query_in_lambdarank():
     rank_example_dir = Path(__file__).absolute().parents[2] / "examples" / "lambdarank"
     X_train, y_train = load_svmlight_file(str(rank_example_dir / "rank.train"))
