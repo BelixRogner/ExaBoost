@@ -4732,11 +4732,14 @@ def test_quantized_training_cuda_matches_cpu():
             lgb.Dataset(X, label=y, params={"device": "cuda"}),
             num_boost_round=10,
         ).predict(X)
+        # Empirically the match is ~1e-8 (float32 round-off); 1e-6 leaves
+        # ~100x headroom while still catching any of the three bugs, which
+        # reappear with diffs of order 0.1 or larger.
         np.testing.assert_allclose(
             cuda_pred,
             cpu_pred,
-            atol=1e-3,
-            rtol=1e-3,
+            atol=1e-6,
+            rtol=1e-6,
             err_msg=f"CUDA quantized predictions diverge from CPU at num_leaves={num_leaves}",
         )
 
