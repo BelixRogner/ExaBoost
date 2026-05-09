@@ -73,6 +73,21 @@ void CUDAColumnData::Init(const int num_columns,
   feature_missing_is_na_ = feature_missing_is_na;
   feature_mfb_is_zero_ = feature_mfb_is_zero;
   feature_mfb_is_na_ = feature_mfb_is_na;
+  // Decide whether to skip the per-column GPU allocation. With a 32 GB GPU and
+  // a 17 GB row matrix on top, we can't afford another 17 GB of per-column data.
+  // Skip when total size would exceed 8 GB; the caller (tree learner) will provide
+  // a compact column view per tree via SetCompactColumnView.
+  size_t expected_total_bytes = 0;
+  for (int c = 0; c < num_columns_; ++c) {
+    const int8_t bt = column_bit_type[c];
+    int bytes_per = (bt == 4 || bt == 8) ? 1 : (bt == 16 ? 2 : 4);
+    expected_total_bytes += static_cast<size_t>(num_data_) * bytes_per;
+  }
+  init_skipped_per_column_alloc_ = (expected_total_bytes > static_cast<size_t>(8) * 1024 * 1024 * 1024);
+  if (init_skipped_per_column_alloc_) {
+    Log::Warning("CUDAColumnData: skipping per-column allocation (would be %.2f GB). "
+                 "Caller must invoke SetCompactColumnView per tree.", expected_total_bytes / 1e9);
+  }
   for (int column_index = 0; column_index < num_columns_; ++column_index) {
     data_by_column_.emplace_back(new CUDAVector<uint8_t>());
   }
@@ -86,7 +101,13 @@ void CUDAColumnData::Init(const int num_columns,
       const int8_t bit_type = column_bit_type[column_index];
       if (column_data[column_index] != nullptr) {
         // is dense column
-        if (bit_type == 4) {
+        if (init_skipped_per_column_alloc_) {
+          // Adjust column_bit_type_ for 4-bit case (which expanded to 8) and skip GPU alloc.
+          if (bit_type == 4) {
+            column_bit_type_[column_index] = 8;
+          }
+          data_by_column_[column_index] = nullptr;
+        } else if (bit_type == 4) {
           column_bit_type_[column_index] = 8;
           InitOneColumnData<false, true, uint8_t>(column_data[column_index], nullptr, data_by_column_[column_index].get());
         } else if (bit_type == 8) {
@@ -181,6 +202,31 @@ void CUDAColumnData::CopySubrow(
   num_used_indices_ = num_used_indices;
   LaunchCopySubrowKernel(full_set->cuda_data_by_column());
   SynchronizeCUDADevice(__FILE__, __LINE__);
+}
+
+void CUDAColumnData::SetCompactColumnView(const std::vector<int>& column_to_compact_slot,
+                                          void* compact_buf,
+                                          size_t bytes_per_col) {
+  // Repoint cuda_data_by_column_ at the per-tree compact buffer. data_by_column_
+  // (the owning unique_ptr<CUDAVector<uint8_t>>s) is left untouched; we only
+  // override the GPU-side pointer table that kernels read.
+  std::vector<uint8_t*> view(num_columns_, nullptr);
+  uint8_t* base = reinterpret_cast<uint8_t*>(compact_buf);
+  for (int c = 0; c < num_columns_; ++c) {
+    if (c < static_cast<int>(column_to_compact_slot.size()) && column_to_compact_slot[c] >= 0) {
+      const size_t off = static_cast<size_t>(column_to_compact_slot[c]) * bytes_per_col;
+      view[c] = base + off;
+    }
+  }
+  cuda_data_by_column_.InitFromHostVector(view);
+}
+
+void CUDAColumnData::RestoreOriginalColumnView() {
+  // Restore cuda_data_by_column_ to point at the original per-column
+  // allocations owned by data_by_column_. No-op when init_skipped_per_column_alloc_
+  // was set (the original "view" is just nullptrs, which is fine as long as
+  // no kernel reads it before another SetCompactColumnView).
+  cuda_data_by_column_.InitFromHostVector(GetDataByColumnPointers(data_by_column_));
 }
 
 void CUDAColumnData::ResizeWhenCopySubrow(const data_size_t num_used_indices) {
