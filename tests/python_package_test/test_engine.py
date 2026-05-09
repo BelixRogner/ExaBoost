@@ -441,6 +441,53 @@ def test_categorical_non_zero_inputs(use_quantized_grad):
     assert evals_result["valid_0"]["auc"][-1] == pytest.approx(ret)
 
 
+@pytest.mark.skipif(getenv("TASK", "") != "cuda", reason="CUDA-only regression test")
+def test_min_data_per_group_cuda_matches_cpu():
+    # Regression test for the categorical kernels in cuda_best_split_finder.cu
+    # ignoring min_data_per_group entirely. Dataset has 200 rows split across
+    # 5 categories (~40 rows each), so any min_data_per_group > 40 must reject
+    # the only candidate split. Before the fix, CUDA accepted the split at
+    # mdpg=100, 1000, 1_000_000 while CPU correctly refused.
+    rng = np.random.default_rng(14)
+    n = 200
+    cont = rng.standard_normal((n, 4)).astype(np.float64)
+    cat = rng.integers(0, 5, size=(n, 2)).astype(np.float64)
+    y = (cont @ rng.standard_normal(4) + 0.5 * cat[:, 0]).astype(np.float64)
+    X = cat  # categorical-only — isolates the categorical kernel
+    base = {
+        "objective": "regression",
+        "num_leaves": 7,
+        "learning_rate": 0.1,
+        "min_data_in_leaf": 5,
+        "min_sum_hessian_in_leaf": 1e-3,
+        "verbose": -1,
+        "deterministic": True,
+        "num_threads": 1,
+        "seed": 42,
+        "feature_pre_filter": False,
+        "gpu_use_dp": True,
+        "force_col_wise": True,
+    }
+    for mdpg in (10, 41, 100, 1000):
+        outcomes = {}
+        for device in ("cpu", "cuda"):
+            ds = lgb.Dataset(
+                X, label=y,
+                params={"verbose": -1, "feature_pre_filter": False},
+                categorical_feature=[0, 1],
+            )
+            bst = lgb.train(
+                {**base, "device_type": device, "min_data_per_group": mdpg},
+                ds, num_boost_round=1,
+            )
+            tree = bst.dump_model()["tree_info"][0]["tree_structure"]
+            outcomes[device] = (tree.get("split_feature"), tree.get("split_gain"))
+        assert outcomes["cpu"] == outcomes["cuda"], (
+            f"CPU/CUDA disagree at min_data_per_group={mdpg}: "
+            f"cpu={outcomes['cpu']} cuda={outcomes['cuda']}"
+        )
+
+
 def test_multiclass():
     X, y = load_digits(n_class=10, return_X_y=True)
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.1, random_state=42)
