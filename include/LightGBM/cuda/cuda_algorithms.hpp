@@ -583,14 +583,14 @@ __device__ VAL_T PercentileDevice(const VAL_T* values,
   }
   if (!USE_WEIGHT) {
     BitonicArgSortDevice<VAL_T, INDEX_T, ASCENDING, BITONIC_SORT_NUM_ELEMENTS / 2, 10>(values, indices, len);
-    const double float_pos = (1.0f - alpha) * len;
-    const INDEX_T pos = static_cast<INDEX_T>(float_pos);
+    const double float_pos = (1.0 - alpha) * static_cast<double>(len - 1);
+    const INDEX_T pos = static_cast<INDEX_T>(float_pos) + 1;
     if (pos < 1) {
       return values[indices[0]];
     } else if (pos >= len) {
       return values[indices[len - 1]];
     } else {
-      const double bias = float_pos - pos;
+      const double bias = float_pos - static_cast<double>(pos - 1);
       const VAL_T v1 = values[indices[pos - 1]];
       const VAL_T v2 = values[indices[pos]];
       return static_cast<VAL_T>(v1 - (v1 - v2) * bias);
