@@ -242,3 +242,119 @@ def test_cuda_l1_median_handles_small_even_and_odd_leaves(n):
                 f"{device_type} n={n} leaf {li} (size {int(mask.sum())}): "
                 f"expected np.median={expected:.10f}, got {actual:.10f}"
             )
+
+
+def _tree_depth(node, depth=0):
+    if "leaf_value" in node:
+        return depth
+    return max(
+        _tree_depth(node["left_child"], depth + 1),
+        _tree_depth(node["right_child"], depth + 1),
+    )
+
+
+def _train_pair(params_overrides, X, y):
+    out = {}
+    for device_type in ("cpu", "cuda"):
+        params = {
+            "objective": "regression",
+            "verbose": -1,
+            "deterministic": True,
+            "num_threads": 1,
+            "seed": 0,
+            "feature_pre_filter": False,
+            "device_type": device_type,
+            "gpu_use_dp": True,
+            "force_col_wise": True,
+            **params_overrides,
+        }
+        ds = lgb.Dataset(X, label=y, params={"verbose": -1, "feature_pre_filter": False})
+        out[device_type] = lgb.train(params, ds, num_boost_round=1)
+    return out
+
+
+@_REQUIRES_CUDA
+@pytest.mark.parametrize(
+    "max_depth,num_leaves",
+    [
+        (1, 2),
+        (1, 7),
+        (2, 4),
+        (2, 7),
+        (2, 31),
+        (3, 7),
+        (3, 31),
+        (5, 31),
+    ],
+)
+def test_cuda_respects_max_depth(max_depth, num_leaves):
+    """CUDA tree learner must enforce max_depth, matching CPU.
+
+    Regression test for the bug where CUDABestSplitFinder had no max_depth
+    check and CUDATree::Split never updated host-side leaf_depth_, causing
+    CUDA to produce trees up to log2(num_leaves) deep regardless of
+    max_depth. With max_depth=2 and num_leaves=31, CUDA was producing
+    depth-7 trees with all 31 leaves filled.
+    """
+    rng = np.random.default_rng(0)
+    n = 400
+    X = rng.standard_normal((n, 6)).astype(np.float64)
+    y = (X @ rng.standard_normal(6) + 0.1 * rng.standard_normal(n)).astype(np.float64)
+
+    models = _train_pair({"max_depth": max_depth, "num_leaves": num_leaves}, X, y)
+
+    cpu_dump = models["cpu"].dump_model()["tree_info"][0]
+    cuda_dump = models["cuda"].dump_model()["tree_info"][0]
+
+    cpu_depth = _tree_depth(cpu_dump["tree_structure"])
+    cuda_depth = _tree_depth(cuda_dump["tree_structure"])
+
+    assert cuda_depth <= max_depth, (
+        f"CUDA exceeded max_depth={max_depth}: produced depth-{cuda_depth} tree "
+        f"with num_leaves={num_leaves}"
+    )
+    assert cpu_depth == cuda_depth, (
+        f"CPU/CUDA depth mismatch with max_depth={max_depth}, num_leaves={num_leaves}: "
+        f"cpu={cpu_depth}, cuda={cuda_depth}"
+    )
+    assert cpu_dump["num_leaves"] == cuda_dump["num_leaves"], (
+        f"CPU/CUDA num_leaves mismatch with max_depth={max_depth}, num_leaves={num_leaves}: "
+        f"cpu={cpu_dump['num_leaves']}, cuda={cuda_dump['num_leaves']}"
+    )
+
+
+@_REQUIRES_CUDA
+def test_cuda_max_depth_matches_cpu_predictions():
+    """End-to-end check: with max_depth set, CUDA predictions match CPU at FP epsilon
+    over multiple boosting rounds. Without the fix, the test case in the parity
+    sweep (`reg_max_depth`) diverged by max|Δ|=0.25 by round 5.
+    """
+    rng = np.random.default_rng(12)
+    n = 200
+    X = rng.standard_normal((n, 8)).astype(np.float64)
+    y = (X @ rng.standard_normal(8) + 0.1 * rng.standard_normal(n)).astype(np.float64)
+
+    params_overrides = {"max_depth": 3, "num_leaves": 7}
+    preds = {}
+    for device_type in ("cpu", "cuda"):
+        params = {
+            "objective": "regression",
+            "verbose": -1,
+            "deterministic": True,
+            "num_threads": 1,
+            "seed": 0,
+            "feature_pre_filter": False,
+            "device_type": device_type,
+            "gpu_use_dp": True,
+            "force_col_wise": True,
+            **params_overrides,
+        }
+        ds = lgb.Dataset(X, label=y, params={"verbose": -1, "feature_pre_filter": False})
+        bst = lgb.train(params, ds, num_boost_round=5)
+        preds[device_type] = bst.predict(X, raw_score=True)
+
+    diff = float(np.abs(preds["cpu"] - preds["cuda"]).max())
+    # Tolerance is well below the ~0.25 divergence the bug produced.
+    assert diff < 1e-5, (
+        f"CPU/CUDA divergence with max_depth=3 over 5 rounds: max|Δ|={diff:.3e}"
+    )
