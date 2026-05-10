@@ -250,7 +250,11 @@ __device__ __forceinline__ void BitonicArgSort_1024(const VAL_T* scores, INDEX_T
           // not stable and reordered tied items. CPU's std::stable_sort never
           // swaps ties; matching that here keeps LambdaRank gradients
           // bit-identical with CPU on round 1 (where all scores are zero).
-          const bool need_swap = ASCENDING
+          // Use the per-pass `ascending` local (which alternates by outer
+          // segment index) -- not the template parameter `ASCENDING` -- so
+          // the bitonic merge still pulls a bitonic sequence into a monotone
+          // one for inputs with non-tied values.
+          const bool need_swap = ascending
               ? (scores[indices[threadIdx.x]] > scores[indices[index_to_compare]])
               : (scores[indices[threadIdx.x]] < scores[indices[index_to_compare]]);
           if (need_swap) {

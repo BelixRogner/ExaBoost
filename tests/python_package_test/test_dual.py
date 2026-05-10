@@ -14,8 +14,8 @@ from .utils import load_breast_cancer
 
 
 _REQUIRES_CUDA = pytest.mark.skipif(
-    os.environ.get("LIGHTGBM_TEST_CUDA", "0") != "1",
-    reason="Set LIGHTGBM_TEST_CUDA=1 to run tests requiring a CUDA-enabled LightGBM build.",
+    os.environ.get("TASK", "") != "cuda",
+    reason="requires CUDA-enabled LightGBM build (set TASK=cuda)",
 )
 
 
@@ -66,6 +66,63 @@ def test_cuda_lambdarank_round1_matches_cpu_within_fp_drift():
     # 0.2 — strict enough to catch the bitonic-sort regression, loose enough to
     # tolerate the FP-precision residual.
     assert diff < 0.2, f"LambdaRank round-1 max|Δ|={diff:.4e} (was ~0.29 before BitonicArgSort fix)"
+
+
+@_REQUIRES_CUDA
+def test_cuda_bitonic_argsort_1024_with_distinct_scores_matches_cpu():
+    """Regression test for BitonicArgSort_1024's per-pass `ascending` direction.
+
+    A first attempt at the tie-stability fix replaced the per-pass `ascending`
+    local with the template parameter `ASCENDING`. That preserves correctness
+    for all-tied inputs (LambdaRank round 1) because the strict comparator
+    returns false either way, but breaks the bitonic merge for non-tied
+    inputs because outer phases must alternate direction.
+
+    BitonicArgSort_1024 is called from the CUDA categorical split-finder
+    (cuda_best_split_finder.cu) over per-category gradient/hessian ratios.
+    Training a small regression with a single categorical feature whose
+    per-category sums are all-distinct exercises that path with non-tied
+    scores; if the comparator stops alternating, CUDA's chosen categorical
+    split disagrees with CPU's.
+    """
+    rng = np.random.default_rng(123)
+    n = 400
+    n_categories = 12
+    cats = rng.integers(0, n_categories, size=n).astype(np.float64)
+    # Per-category mean shift produces distinct, well-separated grad/hess
+    # sums after fitting -- so the categorical sort sees no ties.
+    category_means = rng.standard_normal(n_categories) * 0.7
+    y = (category_means[cats.astype(int)] + rng.standard_normal(n) * 0.05).astype(np.float64)
+    X = cats.reshape(-1, 1)
+
+    base = {
+        "objective": "regression",
+        "verbose": -1,
+        "deterministic": True,
+        "num_threads": 1,
+        "seed": 0,
+        "feature_pre_filter": False,
+        "gpu_use_dp": True,
+        "num_leaves": 4,
+        "min_data_in_leaf": 5,
+        "learning_rate": 0.1,
+    }
+    preds = {}
+    for dev in ("cpu", "cuda"):
+        ds = lgb.Dataset(
+            X, label=y, categorical_feature=[0],
+            params={"verbose": -1, "feature_pre_filter": False},
+        )
+        bst = lgb.train({**base, "device_type": dev}, ds, num_boost_round=1)
+        preds[dev] = bst.predict(X, raw_score=True)
+    diff = float(np.abs(preds["cpu"] - preds["cuda"]).max())
+    # If the bitonic sort stops alternating direction, the categorical
+    # split-finder chooses a different threshold and predictions diverge by
+    # ~O(category mean magnitude). 1e-3 is well above CPU/CUDA FP drift on a
+    # one-tree fit but well below any wrong-split signal.
+    assert diff < 1e-3, (
+        f"CPU vs CUDA prediction disagreement on categorical split: max|Δ|={diff:.4e}"
+    )
 
 
 @pytest.mark.skipif(
