@@ -498,9 +498,14 @@ __device__ void ShuffleSortedPrefixSumDevice(const VAL_T* in_values,
   }
   __syncthreads();
   thread_sum = ShufflePrefixSumExclusive<REDUCE_VAL_T>(thread_sum, shared_buffer);
-  const REDUCE_VAL_T thread_base = shared_buffer[threadIdx.x];
+  // Use the per-thread exclusive prefix sum returned above. The previous
+  // shared_buffer[threadIdx.x] read was OOB whenever blockDim.x > WARPSIZE
+  // (the shared_buffer is sized WARPSIZE) and produced an illegal-memory
+  // access on weighted L1/quantile renewal kernels with blockDim.x = 256.
+  REDUCE_VAL_T running = thread_sum;
   for (INDEX_T index = start; index < end; ++index) {
-    out_values[index] = thread_base + static_cast<REDUCE_VAL_T>(in_values[sorted_indices[index]]);
+    running += static_cast<REDUCE_VAL_T>(in_values[sorted_indices[index]]);
+    out_values[index] = running;
   }
   __syncthreads();
 }
