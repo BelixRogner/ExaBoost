@@ -514,14 +514,14 @@ __global__ void PercentileGlobalKernel(const VAL_T* values,
                                        const INDEX_T len,
                                        VAL_T* out_value) {
   if (!USE_WEIGHT) {
-    const double float_pos = (1.0f - alpha) * len;
-    const INDEX_T pos = static_cast<INDEX_T>(float_pos);
+    const double float_pos = (1.0 - alpha) * static_cast<double>(len - 1);
+    const INDEX_T pos = static_cast<INDEX_T>(float_pos) + 1;
     if (pos < 1) {
       *out_value = values[sorted_indices[0]];
     } else if (pos >= len) {
       *out_value = values[sorted_indices[len - 1]];
     } else {
-      const double bias = float_pos - static_cast<double>(pos);
+      const double bias = float_pos - static_cast<double>(pos - 1);
       const VAL_T v1 = values[sorted_indices[pos - 1]];
       const VAL_T v2 = values[sorted_indices[pos]];
       *out_value = static_cast<VAL_T>(v1 - (v1 - v2) * bias);
