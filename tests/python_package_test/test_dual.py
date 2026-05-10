@@ -48,7 +48,9 @@ def _get_init_score(device_type, objective, alpha, X, y):
 
 
 @_REQUIRES_CUDA
-@pytest.mark.parametrize("objective,alpha", [("regression_l1", 0.5), ("quantile", 0.5), ("quantile", 0.3), ("quantile", 0.7)])
+@pytest.mark.parametrize(
+    "objective,alpha", [("regression_l1", 0.5), ("quantile", 0.5), ("quantile", 0.3), ("quantile", 0.7)]
+)
 @pytest.mark.parametrize("n", [5, 7, 10, 11, 100, 500])
 def test_cuda_init_score_matches_cpu(objective, alpha, n):
     """CUDA percentile-based init scores must match CPU at FP epsilon.
@@ -62,9 +64,7 @@ def test_cuda_init_score_matches_cpu(objective, alpha, n):
     y = np.arange(1, n + 1, dtype=np.float64)
     cpu = _get_init_score("cpu", objective, alpha, X, y)
     cuda = _get_init_score("cuda", objective, alpha, X, y)
-    assert cuda == pytest.approx(cpu, abs=1e-6), (
-        f"{objective} alpha={alpha} n={n}: cpu={cpu} cuda={cuda}"
-    )
+    assert cuda == pytest.approx(cpu, abs=1e-6), f"{objective} alpha={alpha} n={n}: cpu={cpu} cuda={cuda}"
 
 
 @pytest.mark.skipif(
