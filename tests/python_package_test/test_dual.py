@@ -1,6 +1,8 @@
 # coding: utf-8
 """Tests for dual GPU+CPU support."""
 
+import contextlib
+import io
 import os
 import platform
 
@@ -12,7 +14,6 @@ import lightgbm as lgb
 
 from .utils import load_breast_cancer
 
-
 _REQUIRES_CUDA = pytest.mark.skipif(
     os.environ.get("TASK", "") != "cuda",
     reason="requires CUDA-enabled LightGBM build (set TASK=cuda)",
@@ -21,9 +22,6 @@ _REQUIRES_CUDA = pytest.mark.skipif(
 
 def _get_init_score(device_type, objective, alpha, X, y):
     """Train a 1-tree model and read 'Start training from score' from the log."""
-    import io
-    import contextlib
-
     params = {
         "objective": objective,
         "alpha": alpha,
@@ -49,7 +47,7 @@ def _get_init_score(device_type, objective, alpha, X, y):
 
 @_REQUIRES_CUDA
 @pytest.mark.parametrize(
-    "objective,alpha", [("regression_l1", 0.5), ("quantile", 0.5), ("quantile", 0.3), ("quantile", 0.7)]
+    ("objective", "alpha"), [("regression_l1", 0.5), ("quantile", 0.5), ("quantile", 0.3), ("quantile", 0.7)]
 )
 @pytest.mark.parametrize("n", [5, 7, 10, 11, 100, 500])
 def test_cuda_init_score_matches_cpu(objective, alpha, n):
