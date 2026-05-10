@@ -29,9 +29,13 @@ repos:
     hooks:
       - id: cpplint
         args:
-          - --root=..  # workaround to get correct header guard pattern
+          # --root=.. previously made cpplint derive the header-guard prefix
+          # from the parent directory name. After the repo rename to ExaBoost
+          # that prefix no longer matches the existing LIGHTGBM_INCLUDE_*_H_
+          # guards, which we deliberately keep (the C/C++ symbols are not
+          # renamed). Disable the header-guard check, matching .ci/lint-cpp.sh.
           - --recursive
-          - --filter=-build/include_subdir,-whitespace/line_length
+          - --filter=-build/include_subdir,-whitespace/line_length,-build/header_guard
   - repo: local
     hooks:
       - id: check-omp-pragmas
