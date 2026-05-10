@@ -95,8 +95,7 @@ def test_cuda_l1_leaf_renewal_matches_numpy_median(seed):
             expected = float(np.median(y[mask]))
             actual = float(raw[mask][0])
             assert actual == pytest.approx(expected, abs=_PERCENTILE_TOL), (
-                f"{device_type} leaf {li} (n={int(mask.sum())}): "
-                f"expected np.median={expected:.10f}, got {actual:.10f}"
+                f"{device_type} leaf {li} (n={int(mask.sum())}): expected np.median={expected:.10f}, got {actual:.10f}"
             )
 
 
