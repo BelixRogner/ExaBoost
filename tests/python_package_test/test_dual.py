@@ -14,8 +14,8 @@ from .utils import load_breast_cancer
 
 
 _REQUIRES_CUDA = pytest.mark.skipif(
-    os.environ.get("LIGHTGBM_TEST_CUDA", "0") != "1",
-    reason="Set LIGHTGBM_TEST_CUDA=1 to run tests requiring a CUDA-enabled LightGBM build.",
+    os.environ.get("TASK", "") != "cuda",
+    reason="requires CUDA-enabled LightGBM build (set TASK=cuda)",
 )
 
 
