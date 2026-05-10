@@ -472,19 +472,20 @@ def test_min_data_per_group_cuda_matches_cpu():
         outcomes = {}
         for device in ("cpu", "cuda"):
             ds = lgb.Dataset(
-                X, label=y,
+                X,
+                label=y,
                 params={"verbose": -1, "feature_pre_filter": False},
                 categorical_feature=[0, 1],
             )
             bst = lgb.train(
                 {**base, "device_type": device, "min_data_per_group": mdpg},
-                ds, num_boost_round=1,
+                ds,
+                num_boost_round=1,
             )
             tree = bst.dump_model()["tree_info"][0]["tree_structure"]
             outcomes[device] = (tree.get("split_feature"), tree.get("split_gain"))
         assert outcomes["cpu"] == outcomes["cuda"], (
-            f"CPU/CUDA disagree at min_data_per_group={mdpg}: "
-            f"cpu={outcomes['cpu']} cuda={outcomes['cuda']}"
+            f"CPU/CUDA disagree at min_data_per_group={mdpg}: cpu={outcomes['cpu']} cuda={outcomes['cuda']}"
         )
 
 
