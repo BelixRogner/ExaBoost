@@ -310,8 +310,7 @@ def test_cuda_respects_max_depth(max_depth, num_leaves):
     cuda_depth = _tree_depth(cuda_dump["tree_structure"])
 
     assert cuda_depth <= max_depth, (
-        f"CUDA exceeded max_depth={max_depth}: produced depth-{cuda_depth} tree "
-        f"with num_leaves={num_leaves}"
+        f"CUDA exceeded max_depth={max_depth}: produced depth-{cuda_depth} tree with num_leaves={num_leaves}"
     )
     assert cpu_depth == cuda_depth, (
         f"CPU/CUDA depth mismatch with max_depth={max_depth}, num_leaves={num_leaves}: "
@@ -355,6 +354,4 @@ def test_cuda_max_depth_matches_cpu_predictions():
 
     diff = float(np.abs(preds["cpu"] - preds["cuda"]).max())
     # Tolerance is well below the ~0.25 divergence the bug produced.
-    assert diff < 1e-5, (
-        f"CPU/CUDA divergence with max_depth=3 over 5 rounds: max|Δ|={diff:.3e}"
-    )
+    assert diff < 1e-5, f"CPU/CUDA divergence with max_depth=3 over 5 rounds: max|Δ|={diff:.3e}"
