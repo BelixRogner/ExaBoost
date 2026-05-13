@@ -17,6 +17,7 @@ What's different from upstream LightGBM
 - **CUDA correctness fixes** that have been slow to land upstream — int32 overflow in dense histogram offsets, half-sized discretizer buffer, per-tree CUDA stream leak, missing `min_data_per_group` in CUDA categorical kernels, multiple quantized-grad bugs.
 - **Per-tree feature-fraction compact view.** At `colsample_bytree = 0.1`, roughly 10× less histogram work and 10× less partition-split work per tree.
 - **Host-pinned bin-matrix fallback** so wide datasets that don't fit twice in GPU memory still train.
+- **Metal backend** (Apple silicon, M-series) — `device_type=metal` runs histogram construction on the integrated GPU. ~1.1–1.4× end-to-end training speedup on M4 Pro, bit-exact AUC vs CPU.
 - **Open contribution policy.** See [CONTRIBUTING.md](CONTRIBUTING.md). Human and AI contributors are welcome on the same terms.
 
 Install / build
@@ -35,6 +36,53 @@ cmake --build . --target _lightgbm -j 8
 ```
 
 Then install the Python package using upstream's `python-package/build-python.sh --precompile`. The Python module imports as `lightgbm`.
+
+### Building with the Metal backend (macOS, Apple silicon)
+
+The Metal backend accelerates dense histogram construction on the integrated
+GPU. M-series Macs only (Intel Macs not supported).
+
+```bash
+# One-time: vendor Apple's metal-cpp headers.
+mkdir -p external_libs/metal-cpp
+curl -sSL -o /tmp/metal-cpp.zip \
+    "https://developer.apple.com/metal/cpp/files/metal-cpp_macOS15_iOS18.zip"
+unzip -q /tmp/metal-cpp.zip -d /tmp/
+mv /tmp/metal-cpp/{Foundation,Metal,MetalFX,QuartzCore,SingleHeader,LICENSE.txt,README.md} \
+   external_libs/metal-cpp/
+
+# Build.
+mkdir build && cd build
+cmake -DUSE_METAL=ON ..
+cmake --build . -j 8
+
+# Install Python package (precompiled).
+cd .. && sh ./build-python.sh install --precompile
+```
+
+Then use `device_type="metal"` in your training params:
+
+```python
+import lightgbm as lgb
+params = {"objective": "binary", "device_type": "metal", "num_leaves": 63}
+bst = lgb.train(params, dataset, num_boost_round=100)
+```
+
+**Eligibility** (datasets that get Metal acceleration; others transparently
+fall back to CPU):
+- Dense (non-multi-val) features
+- ≤ 256 bins per feature
+- ≥ 32 features (override via `LIGHTGBM_METAL_MIN_FEATURES=N`)
+- `use_quantized_grad = false`
+
+The 16/64/256-bin kernel variants are compiled and selected automatically
+based on each dataset's `max_bin`.
+
+**Numerical parity:** Metal output matches CPU bit-exactly on the
+[binary classification example](examples/binary_classification/) (AUC,
+logloss). On larger datasets, atomic-ordering rounding can produce sub-ULP
+drift; the parity tests in `tests/python_package_test/test_metal.py` assert
+AUC / accuracy / F1 agreement within 2% absolute tolerance.
 
 Documentation
 -------------
