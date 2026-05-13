@@ -402,6 +402,41 @@ def test_quantized_gradient_parity():
     assert metal_auc == pytest.approx(cpu_auc, abs=0.01), (cpu_auc, metal_auc)
 
 
+def test_quantized_force_multi_val_combo_parity():
+    """Stress test: combine LIGHTGBM_METAL_FORCE_MULTI_VAL=1 with
+    use_quantized_grad=True. Exercises Metal q32 kernel on sparse-multi-val
+    data, the most contrived path we support."""
+    from scipy.sparse import csr_matrix
+    orig = os.environ.get("LIGHTGBM_METAL_FORCE_MULTI_VAL")
+    os.environ["LIGHTGBM_METAL_FORCE_MULTI_VAL"] = "1"
+    try:
+        X, y = make_classification(
+            n_samples=2_000, n_features=128, n_informative=20, random_state=48,
+        )
+        X[np.abs(X) < 0.8] = 0
+        Xs = csr_matrix(X)
+        X_train_s, X_test_s, y_train, y_test = train_test_split(
+            Xs, y, test_size=0.25, random_state=48
+        )
+        params = {
+            "objective": "binary", "num_leaves": 15, "learning_rate": 0.1,
+            "use_quantized_grad": True, "verbosity": -1,
+            "deterministic": True, "seed": 0,
+        }
+        cpu_bst = lgb.train(dict(params, device_type="cpu"),
+                            lgb.Dataset(X_train_s, y_train), num_boost_round=20)
+        metal_bst = lgb.train(dict(params, device_type="metal"),
+                              lgb.Dataset(X_train_s, y_train), num_boost_round=20)
+        cpu_auc = roc_auc_score(y_test, cpu_bst.predict(X_test_s))
+        metal_auc = roc_auc_score(y_test, metal_bst.predict(X_test_s))
+        assert metal_auc == pytest.approx(cpu_auc, abs=0.03), (cpu_auc, metal_auc)
+    finally:
+        if orig is None:
+            del os.environ["LIGHTGBM_METAL_FORCE_MULTI_VAL"]
+        else:
+            os.environ["LIGHTGBM_METAL_FORCE_MULTI_VAL"] = orig
+
+
 def test_extra_trees_parity():
     """extra_trees=true uses random split points instead of greedy
     optimal. Different code path through FindBestSplits."""
