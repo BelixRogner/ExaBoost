@@ -126,6 +126,75 @@ kernel void histogram_reduce(
     out[2 * bin + 1] = h;
 }
 
+// K=2 multi-feature variant. Each threadgroup processes TWO adjacent features
+// sharing one read of (gradient, hessian) per row, halving grad/hess memory
+// traffic. Threadgroup memory: 2 * NUM_SUBHIST * NUM_BINS * 2 atomic_uint
+// = 16 KB at NUM_BINS=256 (fits comfortably in the 32 KB threadgroup limit).
+//
+// Opt-in via LIGHTGBM_METAL_K_FEATS=2 — atomic contention may dominate the
+// bandwidth savings on some workloads, so this is gated rather than default.
+#define K2 2u
+kernel void histogram_partial_k2(
+    device const uchar*  features      [[ buffer(0) ]],
+    device const float*  gradients     [[ buffer(1) ]],
+    device const float*  hessians      [[ buffer(2) ]],
+    device float*        partial_hist  [[ buffer(3) ]],
+    constant uint&       num_data      [[ buffer(4) ]],
+    constant uint&       wg_per_feat   [[ buffer(5) ]],
+    uint3 tid3      [[ thread_position_in_threadgroup ]],
+    uint3 gid       [[ threadgroup_position_in_grid ]],
+    uint3 tg_sz3    [[ threads_per_threadgroup ]],
+    uint  sg_idx    [[ simdgroup_index_in_threadgroup ]])
+{
+    uint tid   = tid3.x;
+    uint tg_sz = tg_sz3.x;
+    threadgroup atomic_uint local_grad[K2][NUM_SUBHIST][NUM_BINS];
+    threadgroup atomic_uint local_hess[K2][NUM_SUBHIST][NUM_BINS];
+    for (uint i = tid; i < K2 * NUM_SUBHIST * NUM_BINS; i += tg_sz) {
+        uint k = i / (NUM_SUBHIST * NUM_BINS);
+        uint rem = i % (NUM_SUBHIST * NUM_BINS);
+        uint s = rem / NUM_BINS, b = rem % NUM_BINS;
+        atomic_store_explicit(&local_grad[k][s][b], 0u, memory_order_relaxed);
+        atomic_store_explicit(&local_hess[k][s][b], 0u, memory_order_relaxed);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    uint feat_pair  = gid.y;            // index over (num_features/2) feature pairs
+    uint wg_in_feat = gid.x;
+    uint feat0      = feat_pair * K2;   // first feature in pair
+    uint per_wg     = (num_data + wg_per_feat - 1) / wg_per_feat;
+    uint start      = wg_in_feat * per_wg;
+    uint end        = min(start + per_wg, num_data);
+    device const uchar* col0 = features + (uint64_t)(feat0 + 0) * num_data;
+    device const uchar* col1 = features + (uint64_t)(feat0 + 1) * num_data;
+    uint sub = sg_idx % NUM_SUBHIST;
+    for (uint i = start + tid; i < end; i += tg_sz) {
+        float g = gradients[i];
+        float h = hessians[i];
+        uint b0 = (uint)col0[i];
+        uint b1 = (uint)col1[i];
+        atomic_tg_add_f(&local_grad[0][sub][b0], g);
+        atomic_tg_add_f(&local_hess[0][sub][b0], h);
+        atomic_tg_add_f(&local_grad[1][sub][b1], g);
+        atomic_tg_add_f(&local_hess[1][sub][b1], h);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    // Write each feature's output to its own slot in partial_hist.
+    for (uint k = 0; k < K2; ++k) {
+        uint global_feat = feat0 + k;
+        device float* out =
+            partial_hist + ((uint64_t)global_feat * wg_per_feat + wg_in_feat) * NUM_BINS * 2;
+        for (uint b = tid; b < NUM_BINS; b += tg_sz) {
+            float g_s = 0.0f, h_s = 0.0f;
+            for (uint s = 0; s < NUM_SUBHIST; ++s) {
+                g_s += as_type<float>(atomic_load_explicit(&local_grad[k][s][b], memory_order_relaxed));
+                h_s += as_type<float>(atomic_load_explicit(&local_hess[k][s][b], memory_order_relaxed));
+            }
+            out[2 * b + 0] = g_s;
+            out[2 * b + 1] = h_s;
+        }
+    }
+}
+
 // Indexed variant: only rows whose global index is in `indices[0..num_idx)`
 // contribute. Used for deeper leaves where data_indices is non-null.
 kernel void histogram_partial_indexed(
@@ -217,12 +286,14 @@ struct MetalTreeLearner::MetalState {
     MTL::Library*              library             = nullptr;
     MTL::ComputePipelineState* pso_partial         = nullptr;
     MTL::ComputePipelineState* pso_partial_indexed = nullptr;
+    MTL::ComputePipelineState* pso_partial_k2      = nullptr;  // multi-feature variant
     MTL::ComputePipelineState* pso_reduce          = nullptr;
   };
   PerBinSize bs16, bs64, bs256;
 
   PerBinSize* active = nullptr;   // chosen at BuildDenseFeatureBuffer based on max_num_bin
   int active_bins = 0;            // 16 / 64 / 256
+  int k_feats = 1;                // 1=default kernel, 2=multi-feature kernel
 
   // Persistent device-resident buffers (rebuilt on training-data changes).
   MTL::Buffer* feat_buf     = nullptr;  // uchar [num_metal_features * num_data]
@@ -238,7 +309,8 @@ struct MetalTreeLearner::MetalState {
 
   static void ReleaseBinsize(PerBinSize* bs) {
     auto rel = [](auto*& p) { if (p) { p->release(); p = nullptr; } };
-    rel(bs->pso_partial); rel(bs->pso_partial_indexed); rel(bs->pso_reduce);
+    rel(bs->pso_partial); rel(bs->pso_partial_indexed); rel(bs->pso_partial_k2);
+    rel(bs->pso_reduce);
     rel(bs->library);
   }
 
@@ -323,8 +395,9 @@ void MetalTreeLearner::InitMetal() {
     };
     bs->pso_partial         = make_pso("histogram_partial");
     bs->pso_partial_indexed = make_pso("histogram_partial_indexed");
+    bs->pso_partial_k2      = make_pso("histogram_partial_k2");
     bs->pso_reduce          = make_pso("histogram_reduce");
-    return bs->pso_partial && bs->pso_partial_indexed && bs->pso_reduce;
+    return bs->pso_partial && bs->pso_partial_indexed && bs->pso_partial_k2 && bs->pso_reduce;
   };
   bool ok = compile_variant(&state_->bs16,  16,  16)
          && compile_variant(&state_->bs64,  64,  8)
@@ -439,6 +512,19 @@ bool MetalTreeLearner::BuildDenseFeatureBuffer() {
     int v = std::atoi(env);
     if (v > 0) state_->wg_per_feat = std::min(v, 64);
   }
+  // Multi-feature kernel: opt in via LIGHTGBM_METAL_K_FEATS=2. Only safe when
+  // num_features is even and the active binsize fits 2x in threadgroup memory.
+  state_->k_feats = 1;
+  if (const char* env = std::getenv("LIGHTGBM_METAL_K_FEATS")) {
+    int v = std::atoi(env);
+    if (v == 2 && (num_features % 2 == 0)) {
+      state_->k_feats = 2;
+      Log::Info("Metal: K_FEATS=2 enabled (multi-feature kernel).");
+    } else if (v == 2) {
+      Log::Info("Metal: K_FEATS=2 requested but num_features=%d is odd; falling "
+                "back to K=1.", num_features);
+    }
+  }
   state_->num_metal_features = num_features;
   state_->num_data = num_data;
 
@@ -489,15 +575,22 @@ void MetalTreeLearner::RunMetalHistogram(const score_t* /*gradients*/,
 
   MTL::CommandBuffer* cb = state_->queue->commandBuffer();
   MTL::ComputeCommandEncoder* enc = cb->computeCommandEncoder();
-  enc->setComputePipelineState(state_->active->pso_partial);
+  // Choose partial-kernel variant: K=2 multi-feature when enabled, otherwise K=1.
+  if (state_->k_feats == 2) {
+    enc->setComputePipelineState(state_->active->pso_partial_k2);
+  } else {
+    enc->setComputePipelineState(state_->active->pso_partial);
+  }
   enc->setBuffer(state_->feat_buf, 0, 0);
   enc->setBuffer(state_->grad_buf, 0, 1);
   enc->setBuffer(state_->hess_buf, 0, 2);
   enc->setBuffer(partial_dst, 0, 3);
   enc->setBytes(&nd, sizeof(uint32_t), 4);
   enc->setBytes(&wg, sizeof(uint32_t), 5);
+  // K=2 packs 2 features per threadgroup, halving the y-dim grid count.
+  uint feat_grid = (uint)(state_->num_metal_features / state_->k_feats);
   enc->dispatchThreadgroups(
-      MTL::Size::Make(state_->wg_per_feat, state_->num_metal_features, 1),
+      MTL::Size::Make(state_->wg_per_feat, feat_grid, 1),
       MTL::Size::Make(kThreadsPerGroup, 1, 1));
 
   if (!one_wg) {
