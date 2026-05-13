@@ -251,6 +251,23 @@ kernel void histogram_partial_indexed(
 
 }  // namespace
 
+// Set via LIGHTGBM_METAL_VERIFY=1 — runs CPU histograms alongside Metal,
+// asserts agreement within tolerance, logs drift. Catches kernel regressions
+// during development. Uses CPU result for actual splits.
+struct MetalVerifyState {
+  bool enabled = false;
+  double max_seen_rel = 0.0;
+  uint64_t calls = 0;
+  ~MetalVerifyState() {
+    if (enabled && calls > 0) {
+      std::fprintf(stderr,
+        "[metal-verify] %llu Metal vs CPU comparisons; max_seen_rel=%.6f\n",
+        (unsigned long long)calls, max_seen_rel);
+    }
+  }
+};
+static MetalVerifyState g_verify;
+
 // Set via LIGHTGBM_METAL_TIMING=1 — accumulates per-call timings so users can
 // see where the GPU path is spending time. Reported once at process exit.
 struct MetalTimings {
@@ -346,9 +363,16 @@ void MetalTreeLearner::ResetTrainingDataInner(const Dataset* train_data,
 }
 
 void MetalTreeLearner::InitMetal() {
-  // Honor LIGHTGBM_METAL_TIMING once globally (per process).
+  // Honor LIGHTGBM_METAL_TIMING + LIGHTGBM_METAL_VERIFY once globally.
   if (const char* env = std::getenv("LIGHTGBM_METAL_TIMING")) {
     if (env[0] == '1') g_timings.enabled = true;
+  }
+  if (const char* env = std::getenv("LIGHTGBM_METAL_VERIFY")) {
+    if (env[0] == '1') {
+      g_verify.enabled = true;
+      Log::Info("Metal: LIGHTGBM_METAL_VERIFY=1 — running CPU alongside Metal "
+                "to catch drift. Final histograms will be the CPU values.");
+    }
   }
 
   state_->device = MTL::CreateSystemDefaultDevice();
@@ -773,6 +797,39 @@ void MetalTreeLearner::ConstructHistograms(const std::vector<int8_t>& is_feature
     auto t1 = std::chrono::steady_clock::now();
     g_timings.writeback_us.fetch_add(
         std::chrono::duration_cast<std::chrono::microseconds>(t1 - t_wb0).count());
+  }
+
+  // Verify mode: snapshot Metal histograms, run CPU, compare, log drift.
+  // CPU values then become the source of truth for the rest of training.
+  if (g_verify.enabled) {
+    const int num_features = train_data_->num_features();
+    std::vector<std::vector<float>> metal_snapshot(num_features);
+    for (int f = 0; f < num_features; ++f) {
+      if (!is_feature_used[f]) continue;
+      const int n = per_feature_num_bin_[f] - per_feature_offset_[f];
+      hist_t* d = smaller_leaf_histogram_array_[f].RawData();
+      metal_snapshot[f].assign(d, d + 2 * n);
+    }
+    SerialTreeLearner::ConstructHistograms(is_feature_used, use_subtract);
+    double max_rel = 0.0;
+    for (int f = 0; f < num_features; ++f) {
+      if (!is_feature_used[f]) continue;
+      const hist_t* cpu = smaller_leaf_histogram_array_[f].RawData();
+      const float* metal = metal_snapshot[f].data();
+      const int n = per_feature_num_bin_[f] - per_feature_offset_[f];
+      for (int i = 0; i < 2 * n; ++i) {
+        double diff = std::fabs((double)metal[i] - (double)cpu[i]);
+        double denom = std::max(1e-3, std::fabs((double)cpu[i]));
+        max_rel = std::max(max_rel, diff / denom);
+      }
+    }
+    g_verify.max_seen_rel = std::max(g_verify.max_seen_rel, max_rel);
+    g_verify.calls++;
+    if (max_rel > 0.1) {
+      Log::Warning("Metal: verify drift max_rel=%.4f on smaller leaf "
+                   "(features=%d)", max_rel, num_features);
+    }
+    return;  // CPU already produced larger leaf if needed.
   }
 
   // Larger leaf is computed via subtract in the caller when use_subtract=true
