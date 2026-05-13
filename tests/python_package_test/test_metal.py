@@ -395,6 +395,25 @@ def test_quantized_gradient_falls_back_cleanly():
     assert metal_auc == pytest.approx(cpu_auc, abs=0.001), (cpu_auc, metal_auc)
 
 
+def test_min_gain_to_split_parity():
+    """min_gain_to_split causes some splits to be rejected; verifies
+    the rejected-split path doesn't trip Metal-specific bugs."""
+    X, y = make_classification(
+        n_samples=2_500, n_features=128, random_state=30,
+    )
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.25, random_state=30
+    )
+    cpu_pred, metal_pred = _train_both(
+        {"objective": "binary", "num_leaves": 31, "learning_rate": 0.05,
+         "min_gain_to_split": 0.05},  # filter out marginal splits
+        X_train, y_train, X_test, y_test, num_rounds=40,
+    )
+    cpu_auc = roc_auc_score(y_test, cpu_pred)
+    metal_auc = roc_auc_score(y_test, metal_pred)
+    assert metal_auc == pytest.approx(cpu_auc, abs=0.02), (cpu_auc, metal_auc)
+
+
 def test_single_iteration_parity():
     """num_boost_round=1: only the root tree gets built. Tests Metal
     handles the one-tree case correctly (no leaf-to-leaf state carryover
