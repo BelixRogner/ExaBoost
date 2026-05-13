@@ -402,6 +402,42 @@ def test_quantized_gradient_parity():
     assert metal_auc == pytest.approx(cpu_auc, abs=0.01), (cpu_auc, metal_auc)
 
 
+def test_force_multi_val_metal_parity():
+    """LIGHTGBM_METAL_FORCE_MULTI_VAL=1 makes Metal accelerate sparse /
+    multi-val feature groups even though CPU is typically faster.
+    Verifies the forced path produces matching AUC."""
+    from scipy.sparse import csr_matrix
+    orig = os.environ.get("LIGHTGBM_METAL_FORCE_MULTI_VAL")
+    os.environ["LIGHTGBM_METAL_FORCE_MULTI_VAL"] = "1"
+    try:
+        X, y = make_classification(
+            n_samples=2_000, n_features=128, n_informative=20, random_state=43,
+        )
+        X[np.abs(X) < 0.8] = 0
+        X_sparse = csr_matrix(X)
+        X_train_s, X_test_s, y_train, y_test = train_test_split(
+            X_sparse, y, test_size=0.25, random_state=43
+        )
+        cpu_bst = lgb.train(
+            {"objective": "binary", "num_leaves": 15, "verbosity": -1,
+             "device_type": "cpu", "deterministic": True, "seed": 0},
+            lgb.Dataset(X_train_s, y_train), num_boost_round=30,
+        )
+        metal_bst = lgb.train(
+            {"objective": "binary", "num_leaves": 15, "verbosity": -1,
+             "device_type": "metal", "deterministic": True, "seed": 0},
+            lgb.Dataset(X_train_s, y_train), num_boost_round=30,
+        )
+        cpu_auc = roc_auc_score(y_test, cpu_bst.predict(X_test_s))
+        metal_auc = roc_auc_score(y_test, metal_bst.predict(X_test_s))
+        assert metal_auc == pytest.approx(cpu_auc, abs=0.02), (cpu_auc, metal_auc)
+    finally:
+        if orig is None:
+            del os.environ["LIGHTGBM_METAL_FORCE_MULTI_VAL"]
+        else:
+            os.environ["LIGHTGBM_METAL_FORCE_MULTI_VAL"] = orig
+
+
 def test_quantized_with_early_stopping_parity():
     """Quantized + early stopping: validates the quantized path through
     the full eval+stop callback."""
