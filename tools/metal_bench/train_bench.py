@@ -55,6 +55,7 @@ def bench(num_samples: int, num_features: int, num_iterations: int = 50) -> None
         seed=42,
     )
 
+    results = {}
     for device in ("cpu", "metal"):
         params = dict(base, device_type=device)
         ds = lgb.Dataset(X, y)
@@ -67,10 +68,16 @@ def bench(num_samples: int, num_features: int, num_iterations: int = 50) -> None
         pred = bst.predict(X)
         from sklearn.metrics import roc_auc_score
         auc = roc_auc_score(y, pred)
+        results[device] = (elapsed, auc)
         if CSV_MODE:
             print(f"{num_samples},{num_features},{num_iterations},{device},{elapsed:.4f},{auc:.6f}")
         else:
             print(f"  {device:>5}: {elapsed:6.3f}s  AUC={auc:.6f}")
+    if not CSV_MODE:
+        speedup = results["cpu"][0] / results["metal"][0]
+        auc_diff = abs(results["metal"][1] - results["cpu"][1])
+        marker = "✓" if speedup >= 1.0 else "✗"
+        print(f"  speedup: {speedup:.2f}x {marker}   AUC diff: {auc_diff:.6f}")
 
 
 if __name__ == "__main__":
