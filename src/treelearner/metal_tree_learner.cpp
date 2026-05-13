@@ -583,6 +583,14 @@ void MetalTreeLearner::ConstructHistograms(const std::vector<int8_t>& is_feature
   // ineligible. Also skip the Metal path entirely when quantized gradients
   // are in use — Phase 2.1 doesn't handle the int8/int16 layout yet.
   if (!metal_ready_ || metal_feature_groups_.empty() || config_->use_quantized_grad) {
+    // Log the *runtime* fallback reason once per call (Metal init succeeded
+    // but per-call gating kicked in). Only logged at Debug; cheap.
+    static thread_local bool warned_quantized = false;
+    if (config_->use_quantized_grad && metal_ready_ && !warned_quantized) {
+      Log::Info("Metal: use_quantized_grad=true is not yet supported on Metal; "
+                "delegating histogram construction to CPU for this run.");
+      warned_quantized = true;
+    }
     SerialTreeLearner::ConstructHistograms(is_feature_used, use_subtract);
     return;
   }

@@ -366,6 +366,35 @@ def test_sparse_input_falls_back_cleanly():
     assert metal_auc > 0.85
 
 
+def test_quantized_gradient_falls_back_cleanly():
+    """use_quantized_grad=true triggers LightGBM's int8/int16 gradient path,
+    which Metal doesn't yet support. Should fall back to CPU transparently
+    without crashing, and produce a model identical to device_type=cpu."""
+    X, y = make_classification(
+        n_samples=5_000, n_features=128, n_informative=24, random_state=17,
+    )
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.25, random_state=17
+    )
+    params = {
+        "objective": "binary", "num_leaves": 31, "learning_rate": 0.1,
+        "use_quantized_grad": True, "verbosity": -1,
+        "deterministic": True, "seed": 0,
+    }
+    cpu_ds = lgb.Dataset(X_train, y_train)
+    cpu_bst = lgb.train(dict(params, device_type="cpu"), cpu_ds, num_boost_round=40)
+    metal_ds = lgb.Dataset(X_train, y_train)
+    metal_bst = lgb.train(dict(params, device_type="metal"), metal_ds, num_boost_round=40)
+
+    cpu_pred = cpu_bst.predict(X_test)
+    metal_pred = metal_bst.predict(X_test)
+    cpu_auc = roc_auc_score(y_test, cpu_pred)
+    metal_auc = roc_auc_score(y_test, metal_pred)
+    # Same code path (Metal delegates to SerialTreeLearner) so AUC should
+    # match very tightly.
+    assert metal_auc == pytest.approx(cpu_auc, abs=0.001), (cpu_auc, metal_auc)
+
+
 def test_multiple_models_same_process():
     """Train several distinct datasets sequentially with device_type=metal.
     Verifies the per-MetalTreeLearner state cleans up correctly and
