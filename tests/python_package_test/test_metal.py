@@ -400,6 +400,24 @@ def test_quantized_gradient_parity():
     assert metal_auc == pytest.approx(cpu_auc, abs=0.01), (cpu_auc, metal_auc)
 
 
+def test_quantized_with_feature_fraction_parity():
+    """Quantized + feature_fraction: feature subsampling per tree."""
+    X, y = make_classification(
+        n_samples=3_000, n_features=128, random_state=41,
+    )
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.25, random_state=41
+    )
+    cpu_pred, metal_pred = _train_both(
+        {"objective": "binary", "num_leaves": 31, "learning_rate": 0.1,
+         "use_quantized_grad": True, "feature_fraction": 0.6},
+        X_train, y_train, X_test, y_test, num_rounds=30,
+    )
+    cpu_auc = roc_auc_score(y_test, cpu_pred)
+    metal_auc = roc_auc_score(y_test, metal_pred)
+    assert metal_auc == pytest.approx(cpu_auc, abs=0.02), (cpu_auc, metal_auc)
+
+
 def test_no_regularization_parity():
     """lambda_l1=0, lambda_l2=0, min_gain_to_split=0 — most "raw" possible
     config. Surfaces any numerical bug that gentler configs would mask.
