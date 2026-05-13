@@ -674,6 +674,12 @@ if(BUILD_CPP_TEST)
       tests/cpp_tests/test_stream.cpp
       tests/cpp_tests/testutils.cpp
     )
+  if(USE_METAL)
+    list(APPEND CPP_TEST_SOURCES tests/cpp_tests/test_metal_histogram.cpp)
+    set_source_files_properties(
+      tests/cpp_tests/test_metal_histogram.cpp
+      PROPERTIES COMPILE_FLAGS "-std=c++17")
+  endif()
   if(MSVC)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /permissive-")
   endif()

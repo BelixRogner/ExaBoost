@@ -40,6 +40,8 @@
 #                                   Compile CUDA version.
 #     --gpu
 #                                   Compile GPU version.
+#     --metal
+#                                   Compile Metal version (macOS / Apple silicon).
 #     --integrated-opencl
 #                                   Compile integrated OpenCL version.
 #     --mingw
@@ -145,6 +147,9 @@ while [ $# -gt 0 ]; do
         ;;
     --gpu)
         BUILD_ARGS="${BUILD_ARGS} --config-setting=cmake.define.USE_GPU=ON"
+        ;;
+    --metal)
+        BUILD_ARGS="${BUILD_ARGS} --config-setting=cmake.define.USE_METAL=ON"
         ;;
     --integrated-opencl)
         BUILD_ARGS="${BUILD_ARGS} --config-setting=cmake.define.__INTEGRATE_OPENCL=ON"
@@ -284,6 +289,20 @@ create_isolated_source_dir() {
         -R \
         external_libs/compute/include \
         ./lightgbm-python/external_libs/compute/include/
+
+    #############
+    # metal-cpp #
+    #############
+    if [ -d external_libs/metal-cpp ]; then
+        mkdir -p ./lightgbm-python/external_libs/metal-cpp
+        cp -R \
+            external_libs/metal-cpp/Foundation \
+            external_libs/metal-cpp/Metal \
+            external_libs/metal-cpp/MetalFX \
+            external_libs/metal-cpp/QuartzCore \
+            external_libs/metal-cpp/LICENSE.txt \
+            ./lightgbm-python/external_libs/metal-cpp/
+    fi
 }
 
 create_isolated_source_dir
