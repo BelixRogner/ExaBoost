@@ -85,6 +85,15 @@ logloss). On larger datasets, atomic-ordering rounding can produce sub-ULP
 drift; the parity tests in `tests/python_package_test/test_metal.py` assert
 AUC / accuracy / F1 agreement within 2% absolute tolerance.
 
+**Known edge case:** `min_data_in_leaf<=2` *combined with*
+`min_sum_hessian_in_leaf=0` can trip a LightGBM `left_count > 0` check
+during training because atomic-ordering noise in the Metal histogram's
+bin hessian-sum can make the derived integer row-count round to 0 for
+a nominally-tiny leaf. CPU isn't affected (deterministic histograms).
+Workarounds: stick with the LightGBM defaults (`min_data_in_leaf=20`,
+`min_sum_hessian_in_leaf=1e-3`), or use `device_type="cpu"` if you
+really need extreme regularization settings.
+
 **FAQ:**
 
 - *Why isn't Metal running on my dataset?* Check the verbose log
