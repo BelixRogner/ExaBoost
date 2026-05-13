@@ -84,12 +84,13 @@ logloss). On larger datasets, atomic-ordering rounding can produce sub-ULP
 drift; the parity tests in `tests/python_package_test/test_metal.py` assert
 AUC / accuracy / F1 agreement within 2% absolute tolerance.
 
-**Test coverage:** 18 Python parity tests + 3 cpp gtests covering binary
+**Test coverage:** 25 Python parity tests + 3 cpp gtests covering binary
 classification, multiclass, regression, lambdarank, quantile regression,
-categorical features, bagging, feature_fraction, multi-feature groups,
-early stopping, init_model (continued training), cross-device model
-save/load, sparse-input + quantized-gradient fallbacks, multi-model
-process, and 100k-row drift stress. Run via
+categorical features, bagging, feature_fraction, L1/L2 regularization,
+monotone constraints, multi-feature groups, early stopping, init_model
+(continued training), cross-device model save/load, sparse-input +
+quantized-gradient fallbacks, multi-model process, env-var overrides,
+max_bin boundary, 1024-feature wide, and 100k-row drift stress. Run via
 `LIGHTGBM_TEST_METAL=1 pytest tests/python_package_test/test_metal.py`.
 
 **Environment variables:**
