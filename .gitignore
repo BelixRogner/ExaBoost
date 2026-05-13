@@ -470,4 +470,6 @@ dask-worker-space/
 tools/metal_bench/latest_results.csv
 testlightgbm
 lightgbm-python/
+lib_lightgbm.dylib
+/lightgbm  # the CLI binary, if it ends up at repo root from a CMake build
 
