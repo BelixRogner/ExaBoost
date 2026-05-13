@@ -396,7 +396,14 @@ bool MetalTreeLearner::BuildDenseFeatureBuffer() {
 
   const data_size_t num_data = train_data_->num_data();
   metal_feature_groups_.resize(num_features);
-  for (int f = 0; f < num_features; ++f) metal_feature_groups_[f] = f;
+  per_feature_num_bin_.resize(num_features);
+  per_feature_offset_.resize(num_features);
+  for (int f = 0; f < num_features; ++f) {
+    metal_feature_groups_[f] = f;
+    per_feature_num_bin_[f]  = train_data_->FeatureNumBin(f);
+    per_feature_offset_[f]   =
+        (train_data_->FeatureBinMapper(f)->GetMostFreqBin() == 0) ? 1 : 0;
+  }
 
   // Materialize features into a single uchar buffer.
   const size_t feat_bytes = (size_t)num_features * (size_t)num_data;
@@ -598,9 +605,8 @@ void MetalTreeLearner::ConstructHistograms(const std::vector<int8_t>& is_feature
   #pragma omp parallel for schedule(static)
   for (int f = 0; f < num_features; ++f) {
     if (!is_feature_used[f]) continue;
-    const int num_bin = train_data_->FeatureNumBin(f);
-    const int offset =
-        (train_data_->FeatureBinMapper(f)->GetMostFreqBin() == 0) ? 1 : 0;
+    const int num_bin = per_feature_num_bin_[f];
+    const int offset  = per_feature_offset_[f];
     hist_t* dst = smaller_leaf_histogram_array_[f].RawData();
     const float* src = metal_hist + (size_t)f * state_->active_bins * 2;
     for (int b = offset; b < num_bin; ++b) {

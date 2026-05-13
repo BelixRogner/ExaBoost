@@ -57,6 +57,10 @@ class MetalTreeLearner : public SerialTreeLearner {
 
   /*! \brief Feature groups eligible for Metal acceleration (dense, 256-bin). */
   std::vector<int> metal_feature_groups_;
+  /*! \brief Cached per-feature bin counts (avoids virtual calls in hot write-back loop). */
+  std::vector<int> per_feature_num_bin_;
+  /*! \brief Cached per-feature offset (0 or 1 depending on most-frequent bin). */
+  std::vector<int> per_feature_offset_;
   /*! \brief True when a Metal pipeline is fully ready for histogram construction. */
   bool metal_ready_ = false;
 };
