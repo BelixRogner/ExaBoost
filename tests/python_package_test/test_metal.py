@@ -395,6 +395,27 @@ def test_quantized_gradient_falls_back_cleanly():
     assert metal_auc == pytest.approx(cpu_auc, abs=0.001), (cpu_auc, metal_auc)
 
 
+def test_xentropy_objective_parity():
+    """Cross-entropy objective: y is continuous in [0,1] (probability-like)
+    rather than 0/1. Different gradient pattern; verifies parity."""
+    rng = np.random.default_rng(34)
+    n, p = 3_000, 96
+    X = rng.normal(size=(n, p))
+    # Soft labels in [0,1].
+    logits = X[:, 0] * 0.7 + X[:, 1] * -0.3 + rng.normal(0, 0.2, size=n)
+    y = 1.0 / (1.0 + np.exp(-logits))
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.25, random_state=34
+    )
+    cpu_pred, metal_pred = _train_both(
+        {"objective": "xentropy", "num_leaves": 15, "learning_rate": 0.1},
+        X_train, y_train, X_test, y_test, num_rounds=30,
+    )
+    cpu_mse = mean_squared_error(y_test, cpu_pred)
+    metal_mse = mean_squared_error(y_test, metal_pred)
+    assert metal_mse == pytest.approx(cpu_mse, rel=0.05), (cpu_mse, metal_mse)
+
+
 def test_poisson_objective_parity():
     """Poisson regression has a log-link function producing non-Gaussian
     gradients. Verifies Metal histograms work with that gradient profile."""
