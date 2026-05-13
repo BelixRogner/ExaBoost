@@ -13,7 +13,11 @@
 #include <Metal/Metal.hpp>
 #include <QuartzCore/QuartzCore.hpp>
 
+#include <LightGBM/bin.h>
+#include <LightGBM/dataset.h>
 #include <LightGBM/utils/log.h>
+
+#include "feature_histogram.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -158,6 +162,7 @@ MetalTreeLearner::~MetalTreeLearner() = default;
 void MetalTreeLearner::Init(const Dataset* train_data, bool is_constant_hessian) {
   SerialTreeLearner::Init(train_data, is_constant_hessian);
   InitMetal();
+  if (metal_ready_) BuildDenseFeatureBuffer();
 }
 
 void MetalTreeLearner::ResetTrainingDataInner(const Dataset* train_data,
@@ -211,8 +216,7 @@ void MetalTreeLearner::InitMetal() {
 
   state_->queue = state_->device->newCommandQueue();
   metal_ready_ = true;
-  Log::Info("Metal: backend initialized (kernels compiled, queue ready). "
-            "Histogram-acceleration wiring follows in subsequent commits.");
+  Log::Info("Metal: backend initialized (kernels compiled, queue ready).");
 }
 
 void MetalTreeLearner::TeardownMetal() {
@@ -221,24 +225,184 @@ void MetalTreeLearner::TeardownMetal() {
 }
 
 bool MetalTreeLearner::BuildDenseFeatureBuffer() {
-  // Phase 2.0 stub: returns false so ConstructHistograms always delegates to CPU.
-  // Phase 2.1 will scan train_data_->FeatureGroup(i), select dense single-binsize
-  // groups, materialize a packed uchar buffer in state_->feat_buf, and return true.
-  return false;
+  // Phase 2.1: a dataset is "Metal-eligible" if every feature group is a
+  // single non-multi-val feature with <= NUM_BINS bins. For these we
+  // materialize a packed [num_features × num_data] uchar buffer once.
+  const int num_groups   = train_data_->num_feature_groups();
+  const int num_features = train_data_->num_features();
+  if (num_groups != num_features) {
+    Log::Info("Metal: skipping acceleration (multi-feature groups detected).");
+    return false;
+  }
+  for (int g = 0; g < num_groups; ++g) {
+    if (train_data_->IsMultiGroup(g)) {
+      Log::Info("Metal: skipping acceleration (multi-val feature group %d).", g);
+      return false;
+    }
+    if (train_data_->FeatureGroupNumBin(g) > kNumBins) {
+      Log::Info("Metal: skipping acceleration (group %d has %d bins, > %d).",
+                g, train_data_->FeatureGroupNumBin(g), kNumBins);
+      return false;
+    }
+  }
+
+  const data_size_t num_data = train_data_->num_data();
+  metal_feature_groups_.resize(num_features);
+  for (int f = 0; f < num_features; ++f) metal_feature_groups_[f] = f;
+
+  // Materialize features into a single uchar buffer.
+  const size_t feat_bytes = (size_t)num_features * (size_t)num_data;
+  state_->feat_buf = state_->device->newBuffer(feat_bytes, MTL::ResourceStorageModeShared);
+  if (!state_->feat_buf) {
+    Log::Warning("Metal: failed to allocate feature buffer (%zu bytes).", feat_bytes);
+    return false;
+  }
+  uint8_t* feat_ptr = static_cast<uint8_t*>(state_->feat_buf->contents());
+  for (int f = 0; f < num_features; ++f) {
+    std::unique_ptr<BinIterator> it(train_data_->FeatureIterator(f));
+    uint8_t* col = feat_ptr + (size_t)f * num_data;
+    for (data_size_t i = 0; i < num_data; ++i) {
+      col[i] = static_cast<uint8_t>(it->RawGet(i));
+    }
+  }
+
+  // Allocate gradient/hessian shared buffers (zero-copy on Apple silicon).
+  state_->grad_buf = state_->device->newBuffer((size_t)num_data * sizeof(score_t),
+                                               MTL::ResourceStorageModeShared);
+  state_->hess_buf = state_->device->newBuffer((size_t)num_data * sizeof(score_t),
+                                               MTL::ResourceStorageModeShared);
+
+  // Auto-tune wg_per_feat so a 20-core M-series GPU stays saturated.
+  state_->wg_per_feat = std::max(1, std::min(32, 512 / std::max(num_features, 1)));
+  state_->num_metal_features = num_features;
+  state_->num_data = num_data;
+
+  state_->partial_buf = state_->device->newBuffer(
+      (size_t)num_features * (size_t)state_->wg_per_feat * kNumBins * 2 * sizeof(float),
+      MTL::ResourceStorageModePrivate);
+  state_->out_buf = state_->device->newBuffer(
+      (size_t)num_features * kNumBins * 2 * sizeof(float),
+      MTL::ResourceStorageModeShared);
+
+  Log::Info("Metal: %d-feature dense buffer materialized (%.1f MB). "
+            "wg_per_feat=%d, NUM_BINS=%d.",
+            num_features, feat_bytes / 1048576.0, state_->wg_per_feat, kNumBins);
+  return true;
 }
 
-void MetalTreeLearner::RunMetalHistogram(const score_t* /*gradients*/,
-                                         const score_t* /*hessians*/,
-                                         data_size_t /*num_data*/) {
-  // Phase 2.0 stub. The dispatch is exercised in tools/metal_bench/; integration
-  // follows in subsequent commits.
+void MetalTreeLearner::RunMetalHistogram(const score_t* gradients,
+                                         const score_t* hessians,
+                                         data_size_t num_data) {
+  // Copy g/h into shared buffers (zero-copy on Apple silicon).
+  std::memcpy(state_->grad_buf->contents(), gradients,
+              (size_t)num_data * sizeof(score_t));
+  std::memcpy(state_->hess_buf->contents(), hessians,
+              (size_t)num_data * sizeof(score_t));
+
+  // Build a tiny constant buffer for num_data + wg_per_feat. These vary per
+  // call (num_data shrinks on deeper leaves), so we re-emit each dispatch.
+  uint32_t nd = (uint32_t)num_data;
+  uint32_t wg = (uint32_t)state_->wg_per_feat;
+
+  MTL::CommandBuffer* cb = state_->queue->commandBuffer();
+  MTL::ComputeCommandEncoder* enc = cb->computeCommandEncoder();
+  enc->setComputePipelineState(state_->pso_partial);
+  enc->setBuffer(state_->feat_buf, 0, 0);
+  enc->setBuffer(state_->grad_buf, 0, 1);
+  enc->setBuffer(state_->hess_buf, 0, 2);
+  enc->setBuffer(state_->partial_buf, 0, 3);
+  enc->setBytes(&nd, sizeof(uint32_t), 4);
+  enc->setBytes(&wg, sizeof(uint32_t), 5);
+  enc->dispatchThreadgroups(
+      MTL::Size::Make(state_->wg_per_feat, state_->num_metal_features, 1),
+      MTL::Size::Make(kThreadsPerGroup, 1, 1));
+
+  enc->setComputePipelineState(state_->pso_reduce);
+  enc->setBuffer(state_->partial_buf, 0, 0);
+  enc->setBuffer(state_->out_buf, 0, 1);
+  enc->setBytes(&wg, sizeof(uint32_t), 2);
+  enc->dispatchThreadgroups(
+      MTL::Size::Make(state_->num_metal_features, 1, 1),
+      MTL::Size::Make(kNumBins, 1, 1));
+  enc->endEncoding();
+  cb->commit();
+  cb->waitUntilCompleted();
 }
 
 void MetalTreeLearner::ConstructHistograms(const std::vector<int8_t>& is_feature_used,
                                            bool use_subtract) {
-  // Phase 2.0: route to the CPU implementation while the Metal pipeline is
-  // being wired. This keeps device_type=metal numerically identical to CPU.
-  SerialTreeLearner::ConstructHistograms(is_feature_used, use_subtract);
+  // Fall back to the CPU path when Metal isn't fully wired or the dataset is
+  // ineligible. Also skip the Metal path entirely when quantized gradients
+  // are in use — Phase 2.1 doesn't handle the int8/int16 layout yet.
+  if (!metal_ready_ || metal_feature_groups_.empty() || config_->use_quantized_grad) {
+    SerialTreeLearner::ConstructHistograms(is_feature_used, use_subtract);
+    return;
+  }
+
+  Common::FunctionTimer fun_timer("MetalTreeLearner::ConstructHistograms",
+                                  global_timer);
+
+  // Gather ordered gradients/hessians for the smaller leaf. data_indices ==
+  // nullptr means "all data in original order" (root case).
+  const data_size_t leaf_num_data = smaller_leaf_splits_->num_data_in_leaf();
+  const data_size_t* data_indices = smaller_leaf_splits_->data_indices();
+  const score_t* g_src = gradients_;
+  const score_t* h_src = hessians_;
+  if (data_indices != nullptr && leaf_num_data < state_->num_data) {
+    score_t* og = ordered_gradients_.data();
+    score_t* oh = ordered_hessians_.data();
+    OMP_INIT_EX();
+    #pragma omp parallel for schedule(static)
+    for (data_size_t i = 0; i < leaf_num_data; ++i) {
+      og[i] = gradients_[data_indices[i]];
+      oh[i] = hessians_[data_indices[i]];
+    }
+    OMP_THROW_EX();
+    g_src = og;
+    h_src = oh;
+  }
+
+  // The Metal kernel always iterates the *full* feature column, so it needs
+  // the gradient/hessian array indexed by global row id, not leaf row id.
+  // For the leaf-subset case, the OpenCL backend passes an `indices` buffer
+  // and skips disabled rows. Phase 2.1 doesn't have that yet, so we fall
+  // back to the CPU path when this matters (deeper leaves).
+  if (leaf_num_data != state_->num_data) {
+    SerialTreeLearner::ConstructHistograms(is_feature_used, use_subtract);
+    return;
+  }
+
+  // Root-leaf, full-data path: run Metal, then write back into the
+  // smaller-leaf histogram array.
+  RunMetalHistogram(g_src, h_src, state_->num_data);
+
+  const float* metal_hist = static_cast<const float*>(state_->out_buf->contents());
+  hist_t* hist_base =
+      smaller_leaf_histogram_array_[0].RawData() - kHistOffset;
+  const int num_features = train_data_->num_features();
+  #pragma omp parallel for schedule(static)
+  for (int f = 0; f < num_features; ++f) {
+    if (!is_feature_used[f]) continue;
+    const int num_bin = train_data_->FeatureGroupNumBin(f);
+    hist_t* dst = hist_base + 2 * train_data_->GroupBinBoundary(f);
+    const float* src = metal_hist + (size_t)f * kNumBins * 2;
+    for (int b = 0; b < num_bin; ++b) {
+      dst[2 * b + 0] = src[2 * b + 0];
+      dst[2 * b + 1] = src[2 * b + 1];
+    }
+  }
+
+  // Larger leaf is computed via subtract in the caller when use_subtract=true.
+  // When use_subtract=false (rare at root), build it with the CPU path so we
+  // don't have to also reorder gradients for the *other* leaf on GPU yet.
+  if (larger_leaf_histogram_array_ != nullptr && !use_subtract) {
+    // We've already produced smaller-leaf histograms; ask the base class to
+    // compute only the larger leaf by temporarily zeroing the smaller-leaf
+    // marker is brittle. Simpler: delegate the whole thing (smaller leaf gets
+    // recomputed on CPU). The double-work is rare and only at split-equal
+    // leaf sizes.
+    SerialTreeLearner::ConstructHistograms(is_feature_used, use_subtract);
+  }
 }
 
 }  // namespace LightGBM
