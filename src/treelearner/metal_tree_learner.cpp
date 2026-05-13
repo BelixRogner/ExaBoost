@@ -187,19 +187,22 @@ kernel void histogram_partial_indexed(
 struct MetalTimings {
   std::atomic<uint64_t> calls{0};
   std::atomic<uint64_t> idx_copy_us{0};
-  std::atomic<uint64_t> dispatch_us{0};   // commit + waitUntilCompleted
+  std::atomic<uint64_t> dispatch_us{0};   // commit + waitUntilCompleted (wall clock)
+  std::atomic<uint64_t> gpu_us{0};        // MTL::CommandBuffer GPU-only time
   std::atomic<uint64_t> writeback_us{0};
   bool enabled = false;
   ~MetalTimings() {
     if (enabled && calls.load() > 0) {
       uint64_t n = calls.load();
       std::fprintf(stderr,
-        "[metal-timing] calls=%llu  idx_copy=%.2fms  dispatch=%.2fms  writeback=%.2fms  "
-        "(per-call avg: idx_copy=%.2fus dispatch=%.2fus writeback=%.2fus)\n",
+        "[metal-timing] calls=%llu  idx_copy=%.2fms  dispatch=%.2fms  "
+        "gpu_only=%.2fms  writeback=%.2fms  (per-call avg: "
+        "idx_copy=%.2fus dispatch=%.2fus gpu_only=%.2fus writeback=%.2fus)\n",
         (unsigned long long)n,
-        idx_copy_us.load() / 1000.0, dispatch_us.load() / 1000.0, writeback_us.load() / 1000.0,
+        idx_copy_us.load() / 1000.0, dispatch_us.load() / 1000.0,
+        gpu_us.load() / 1000.0, writeback_us.load() / 1000.0,
         (double)idx_copy_us.load() / n, (double)dispatch_us.load() / n,
-        (double)writeback_us.load() / n);
+        (double)gpu_us.load() / n, (double)writeback_us.load() / n);
     }
   }
 };
@@ -510,6 +513,10 @@ void MetalTreeLearner::RunMetalHistogram(const score_t* /*gradients*/,
   enc->endEncoding();
   cb->commit();
   cb->waitUntilCompleted();
+  if (g_timings.enabled) {
+    double gpu_s = cb->GPUEndTime() - cb->GPUStartTime();
+    if (gpu_s > 0) g_timings.gpu_us.fetch_add((uint64_t)(gpu_s * 1e6));
+  }
 }
 
 void MetalTreeLearner::RunMetalHistogramIndexed(const data_size_t* data_indices,
@@ -564,6 +571,10 @@ void MetalTreeLearner::RunMetalHistogramIndexed(const data_size_t* data_indices,
   enc->endEncoding();
   cb->commit();
   cb->waitUntilCompleted();
+  if (g_timings.enabled) {
+    double gpu_s = cb->GPUEndTime() - cb->GPUStartTime();
+    if (gpu_s > 0) g_timings.gpu_us.fetch_add((uint64_t)(gpu_s * 1e6));
+  }
 }
 
 void MetalTreeLearner::ConstructHistograms(const std::vector<int8_t>& is_feature_used,
