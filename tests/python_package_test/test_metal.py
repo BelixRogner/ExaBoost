@@ -395,6 +395,27 @@ def test_quantized_gradient_falls_back_cleanly():
     assert metal_auc == pytest.approx(cpu_auc, abs=0.001), (cpu_auc, metal_auc)
 
 
+def test_monotone_constraints_parity():
+    """monotone_constraints restricts splits to monotone wrt features;
+    different split-gain code path. Verifies histograms still match."""
+    X, y = make_classification(
+        n_samples=3_000, n_features=64, n_informative=20, random_state=27,
+    )
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.25, random_state=27
+    )
+    constraints = [1] * 16 + [-1] * 16 + [0] * (X.shape[1] - 32)
+    cpu_pred, metal_pred = _train_both(
+        {"objective": "binary", "num_leaves": 15, "learning_rate": 0.1,
+         "monotone_constraints": constraints,
+         "monotone_constraints_method": "basic"},
+        X_train, y_train, X_test, y_test, num_rounds=30,
+    )
+    cpu_auc = roc_auc_score(y_test, cpu_pred)
+    metal_auc = roc_auc_score(y_test, metal_pred)
+    assert metal_auc == pytest.approx(cpu_auc, abs=0.02), (cpu_auc, metal_auc)
+
+
 def test_l1_regularization_parity():
     """lambda_l1 changes the split-gain formula; verifies the histogram
     output produces the same regularized splits on cpu and metal."""
