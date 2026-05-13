@@ -656,16 +656,36 @@ void MetalTreeLearner::ConstructHistograms(const std::vector<int8_t>& is_feature
         std::chrono::duration_cast<std::chrono::microseconds>(t1 - t_wb0).count());
   }
 
-  // Larger leaf is computed via subtract in the caller when use_subtract=true.
-  // When use_subtract=false (rare at root), build it with the CPU path so we
-  // don't have to also reorder gradients for the *other* leaf on GPU yet.
+  // Larger leaf is computed via subtract in the caller when use_subtract=true
+  // (typical case). Otherwise (mostly at the root where there's no parent
+  // histogram to subtract from), build the larger leaf on Metal too.
   if (larger_leaf_histogram_array_ != nullptr && !use_subtract) {
-    // We've already produced smaller-leaf histograms; ask the base class to
-    // compute only the larger leaf by temporarily zeroing the smaller-leaf
-    // marker is brittle. Simpler: delegate the whole thing (smaller leaf gets
-    // recomputed on CPU). The double-work is rare and only at split-equal
-    // leaf sizes.
-    SerialTreeLearner::ConstructHistograms(is_feature_used, use_subtract);
+    const data_size_t larger_num_data = larger_leaf_splits_->num_data_in_leaf();
+    const data_size_t* larger_indices = larger_leaf_splits_->data_indices();
+    if (larger_indices == nullptr || larger_num_data == state_->num_data) {
+      RunMetalHistogram(gradients_, hessians_, state_->num_data);
+    } else {
+      RunMetalHistogramIndexed(larger_indices, larger_num_data);
+    }
+    const float* metal_hist2 = static_cast<const float*>(state_->out_buf->contents());
+    const bool parallel_writeback2 = num_features >= 256;
+    auto write_back_larger = [&](int f) {
+      if (!is_feature_used[f]) return;
+      const int num_bin = per_feature_num_bin_[f];
+      const int offset  = per_feature_offset_[f];
+      hist_t* dst = larger_leaf_histogram_array_[f].RawData();
+      const float* src = metal_hist2 + (size_t)f * state_->active_bins * 2;
+      for (int b = offset; b < num_bin; ++b) {
+        dst[2 * (b - offset) + 0] = src[2 * b + 0];
+        dst[2 * (b - offset) + 1] = src[2 * b + 1];
+      }
+    };
+    if (parallel_writeback2) {
+      #pragma omp parallel for schedule(static)
+      for (int f = 0; f < num_features; ++f) write_back_larger(f);
+    } else {
+      for (int f = 0; f < num_features; ++f) write_back_larger(f);
+    }
   }
 }
 
