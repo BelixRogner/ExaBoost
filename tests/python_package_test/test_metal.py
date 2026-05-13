@@ -395,6 +395,41 @@ def test_quantized_gradient_falls_back_cleanly():
     assert metal_auc == pytest.approx(cpu_auc, abs=0.001), (cpu_auc, metal_auc)
 
 
+def test_model_save_load_cross_device():
+    """Train on Metal, save model to disk, load with no device specified,
+    predict — verify the saved model is device-agnostic (no Metal-specific
+    state baked into the model file)."""
+    import os
+    import tempfile
+
+    X, y = make_classification(
+        n_samples=2_000, n_features=64, random_state=20,
+    )
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.25, random_state=20
+    )
+    params = dict(
+        objective="binary", num_leaves=15, learning_rate=0.1,
+        verbosity=-1, deterministic=True, seed=42,
+        device_type="metal",
+    )
+    bst = lgb.train(params, lgb.Dataset(X_train, y_train), num_boost_round=30)
+
+    with tempfile.NamedTemporaryFile(suffix=".lgb", delete=False) as f:
+        tmp_path = f.name
+    try:
+        bst.save_model(tmp_path)
+        loaded = lgb.Booster(model_file=tmp_path)
+        cpu_pred = loaded.predict(X_test)
+        metal_pred = bst.predict(X_test)
+        # Same trees should give identical predictions regardless of
+        # original training device (no Metal state in the model file).
+        assert np.allclose(cpu_pred, metal_pred, atol=1e-8), \
+            f"max diff: {np.abs(cpu_pred - metal_pred).max()}"
+    finally:
+        os.unlink(tmp_path)
+
+
 def test_continue_training_parity():
     """init_model=existing_model continues training from a previous state.
     Verifies Metal handles the gradient computation correctly when starting
