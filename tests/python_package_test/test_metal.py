@@ -402,6 +402,25 @@ def test_quantized_gradient_parity():
     assert metal_auc == pytest.approx(cpu_auc, abs=0.01), (cpu_auc, metal_auc)
 
 
+def test_max_depth_parity():
+    """max_depth limits tree depth independent of num_leaves. Common
+    LightGBM regularization knob."""
+    X, y = make_classification(
+        n_samples=2_500, n_features=128, random_state=44,
+    )
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.25, random_state=44
+    )
+    cpu_pred, metal_pred = _train_both(
+        {"objective": "binary", "num_leaves": 63, "max_depth": 5,
+         "learning_rate": 0.1},
+        X_train, y_train, X_test, y_test, num_rounds=30,
+    )
+    cpu_auc = roc_auc_score(y_test, cpu_pred)
+    metal_auc = roc_auc_score(y_test, metal_pred)
+    assert metal_auc == pytest.approx(cpu_auc, abs=0.02), (cpu_auc, metal_auc)
+
+
 def test_force_multi_val_metal_parity():
     """LIGHTGBM_METAL_FORCE_MULTI_VAL=1 makes Metal accelerate sparse /
     multi-val feature groups even though CPU is typically faster.
