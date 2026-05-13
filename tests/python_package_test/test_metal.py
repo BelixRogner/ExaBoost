@@ -400,6 +400,27 @@ def test_quantized_gradient_parity():
     assert metal_auc == pytest.approx(cpu_auc, abs=0.01), (cpu_auc, metal_auc)
 
 
+def test_quantized_multiclass_parity():
+    """Quantized + multiclass: builds num_class trees per iteration."""
+    X, y = make_classification(
+        n_samples=3_000, n_features=128, n_informative=24, n_classes=4,
+        n_clusters_per_class=2, random_state=38,
+    )
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.25, random_state=38
+    )
+    cpu_pred, metal_pred = _train_both(
+        {"objective": "multiclass", "num_class": 4, "num_leaves": 15,
+         "learning_rate": 0.1, "use_quantized_grad": True},
+        X_train, y_train, X_test, y_test, num_rounds=20,
+    )
+    cpu_lbl = cpu_pred.argmax(axis=1)
+    metal_lbl = metal_pred.argmax(axis=1)
+    cpu_acc = accuracy_score(y_test, cpu_lbl)
+    metal_acc = accuracy_score(y_test, metal_lbl)
+    assert metal_acc == pytest.approx(cpu_acc, abs=0.03), (cpu_acc, metal_acc)
+
+
 def test_quantized_with_bagging_parity():
     """Quantized gradient mode + bagging: stresses both code paths
     (q32 kernel + indexed dispatch with int8 gather)."""
