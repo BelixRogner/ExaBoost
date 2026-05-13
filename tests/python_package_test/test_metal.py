@@ -366,6 +366,31 @@ def test_sparse_input_falls_back_cleanly():
     assert metal_auc > 0.85
 
 
+def test_multiple_models_same_process():
+    """Train several distinct datasets sequentially with device_type=metal.
+    Verifies the per-MetalTreeLearner state cleans up correctly and
+    different dataset shapes don't bleed into each other."""
+    shapes = [
+        (1_500, 64),
+        (2_000, 128),
+        (1_000, 256),
+        (1_500, 96),
+    ]
+    aucs = []
+    for seed, (n, p) in enumerate(shapes):
+        X, y = make_classification(n_samples=n, n_features=p, random_state=seed)
+        ds = lgb.Dataset(X, y)
+        params = {
+            "objective": "binary", "num_leaves": 15, "learning_rate": 0.1,
+            "verbosity": -1, "deterministic": True, "seed": 0,
+            "device_type": "metal",
+        }
+        bst = lgb.train(params, ds, num_boost_round=20)
+        aucs.append(roc_auc_score(y, bst.predict(X)))
+    # All should be high AUC since the synthetic data is recoverable.
+    assert all(a > 0.85 for a in aucs), aucs
+
+
 def test_large_scale_drift():
     """Stress test with 100k rows + 128 features + 100 trees. Each
     histogram cell accumulates ~800 floats; atomic-ordering drift
