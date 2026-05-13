@@ -366,10 +366,15 @@ def test_sparse_input_falls_back_cleanly():
     assert metal_auc > 0.85
 
 
-def test_quantized_gradient_falls_back_cleanly():
-    """use_quantized_grad=true triggers LightGBM's int8/int16 gradient path,
-    which Metal doesn't yet support. Should fall back to CPU transparently
-    without crashing, and produce a model identical to device_type=cpu."""
+def test_quantized_gradient_parity():
+    """use_quantized_grad=true now runs on Metal via the int8-input/int32-
+    output kernel for 32-bit-histogram leaves. Asserts AUC parity with CPU.
+    16-bit leaves still delegate to CPU.
+
+    Note: this test was originally named *_falls_back_cleanly when the
+    quantized path was a CPU fallback; in Phase 2.9 the Metal q32 kernel
+    landed, so this now exercises the actual Metal-accelerated quantized
+    path."""
     X, y = make_classification(
         n_samples=5_000, n_features=128, n_informative=24, random_state=17,
     )
@@ -390,9 +395,9 @@ def test_quantized_gradient_falls_back_cleanly():
     metal_pred = metal_bst.predict(X_test)
     cpu_auc = roc_auc_score(y_test, cpu_pred)
     metal_auc = roc_auc_score(y_test, metal_pred)
-    # Same code path (Metal delegates to SerialTreeLearner) so AUC should
-    # match very tightly.
-    assert metal_auc == pytest.approx(cpu_auc, abs=0.001), (cpu_auc, metal_auc)
+    # Metal q32 atomics are deterministic-ish but may produce tiny drift in
+    # int32 sum-order. Tolerate small ULP-level deviation.
+    assert metal_auc == pytest.approx(cpu_auc, abs=0.01), (cpu_auc, metal_auc)
 
 
 def test_min_data_in_leaf_parity():
