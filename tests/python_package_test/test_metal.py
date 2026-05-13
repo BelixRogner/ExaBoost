@@ -400,6 +400,26 @@ def test_quantized_gradient_parity():
     assert metal_auc == pytest.approx(cpu_auc, abs=0.01), (cpu_auc, metal_auc)
 
 
+def test_quantized_with_bagging_parity():
+    """Quantized gradient mode + bagging: stresses both code paths
+    (q32 kernel + indexed dispatch with int8 gather)."""
+    X, y = make_classification(
+        n_samples=4_000, n_features=128, random_state=37,
+    )
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.25, random_state=37
+    )
+    cpu_pred, metal_pred = _train_both(
+        {"objective": "binary", "num_leaves": 31, "learning_rate": 0.1,
+         "use_quantized_grad": True,
+         "bagging_fraction": 0.5, "bagging_freq": 1},
+        X_train, y_train, X_test, y_test, num_rounds=30,
+    )
+    cpu_auc = roc_auc_score(y_test, cpu_pred)
+    metal_auc = roc_auc_score(y_test, metal_pred)
+    assert metal_auc == pytest.approx(cpu_auc, abs=0.02), (cpu_auc, metal_auc)
+
+
 def test_min_data_in_leaf_parity():
     """min_data_in_leaf prevents tiny leaves; common LightGBM regularization
     knob. Verifies the Metal path respects it correctly."""
