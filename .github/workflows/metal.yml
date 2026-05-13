@@ -1,0 +1,78 @@
+name: Metal Backend (macOS arm64)
+
+on:
+  push:
+    branches:
+      - master
+      - metal-backend
+  pull_request:
+    branches:
+      - master
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: build + parity tests
+    # macos-15 and macos-14 are Apple silicon (M-series). Stick with `latest`
+    # so the job follows GitHub's default arm64 runner.
+    runs-on: macos-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          brew install cmake libomp
+
+      - name: Download metal-cpp headers
+        run: |
+          if [ ! -d external_libs/metal-cpp/Metal ]; then
+            mkdir -p external_libs/metal-cpp
+            curl -sSL -o /tmp/metal-cpp.zip "https://developer.apple.com/metal/cpp/files/metal-cpp_macOS15_iOS18.zip"
+            unzip -q /tmp/metal-cpp.zip -d /tmp/
+            mv /tmp/metal-cpp/Foundation /tmp/metal-cpp/Metal /tmp/metal-cpp/MetalFX \
+               /tmp/metal-cpp/QuartzCore /tmp/metal-cpp/SingleHeader \
+               /tmp/metal-cpp/LICENSE.txt /tmp/metal-cpp/README.md \
+               external_libs/metal-cpp/
+          fi
+          ls external_libs/metal-cpp/Metal/ | head -3
+
+      - name: Configure CMake (USE_METAL=ON, BUILD_CPP_TEST=ON)
+        run: |
+          mkdir -p build
+          cd build
+          cmake -DUSE_METAL=ON -DBUILD_CPP_TEST=ON -DCMAKE_BUILD_TYPE=Release ..
+
+      - name: Build
+        run: |
+          cd build
+          cmake --build . -j $(sysctl -n hw.logicalcpu)
+
+      - name: cpp Metal histogram tests
+        run: ./testlightgbm '--gtest_filter=MetalHistogramTest.*'
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip 'build>=0.10.0'
+          python -m pip install numpy scipy scikit-learn pytest
+
+      - name: Install lightgbm (precompiled)
+        run: |
+          sh ./build-python.sh install --precompile
+
+      - name: Python parity tests
+        run: |
+          LIGHTGBM_TEST_METAL=1 python -m pytest tests/python_package_test/test_metal.py -v
