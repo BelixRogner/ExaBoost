@@ -84,7 +84,19 @@ logloss). On larger datasets, atomic-ordering rounding can produce sub-ULP
 drift; the parity tests in `tests/python_package_test/test_metal.py` assert
 AUC / accuracy / F1 agreement within 2% absolute tolerance.
 
-**Test coverage:** 25 Python parity tests + 3 cpp gtests covering binary
+**FAQ:**
+
+- *Why isn't Metal running on my dataset?* Check the verbose log
+  (`verbose=2`); look for `Metal: skipping acceleration (...)`. The
+  message tells you why — usually narrow data (< 96 features),
+  multi-val groups, > 256 bins, or `use_quantized_grad=true`.
+- *Can I use Metal on Intel Macs?* No, the kernels rely on Apple-silicon
+  features (atomic_uint in threadgroup memory, MSL 3.0 SIMD operations).
+- *Does this affect inference?* No, prediction is CPU-only and unchanged.
+- *Will my saved model load on a non-Metal build?* Yes, model files are
+  device-agnostic — see `test_model_save_load_cross_device`.
+
+**Test coverage:** 27 Python parity tests + 3 cpp gtests covering binary
 classification, multiclass, regression, lambdarank, quantile regression,
 categorical features, bagging, feature_fraction, L1/L2 regularization,
 monotone constraints, multi-feature groups, early stopping, init_model
