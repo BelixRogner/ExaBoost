@@ -289,9 +289,9 @@ bool MetalTreeLearner::BuildDenseFeatureBuffer() {
   const int num_features = train_data_->num_features();
 
   // Heuristic: Metal dispatch overhead dominates on very narrow datasets where
-  // the GPU is underfilled. Default crossover is ~96 features on M4 Pro
+  // the GPU is underfilled. Default crossover is ~32 features on M4 Pro
   // (measured via tools/metal_bench/train_bench.py). Override with the env var.
-  int min_features = 96;
+  int min_features = 32;
   if (const char* env = std::getenv("LIGHTGBM_METAL_MIN_FEATURES")) {
     int v = std::atoi(env);
     if (v > 0) min_features = v;
@@ -367,14 +367,23 @@ bool MetalTreeLearner::BuildDenseFeatureBuffer() {
   return true;
 }
 
-void MetalTreeLearner::RunMetalHistogram(const score_t* gradients,
-                                         const score_t* hessians,
+void MetalTreeLearner::BeforeTrain() {
+  SerialTreeLearner::BeforeTrain();
+  // Gradients/hessians are set once per tree by the caller before BeforeTrain.
+  // Copy them into the shared Metal buffers exactly once here so the per-leaf
+  // histogram dispatch doesn't re-pay the memcpy.
+  if (metal_ready_ && !metal_feature_groups_.empty()) {
+    std::memcpy(state_->grad_buf->contents(), gradients_,
+                (size_t)state_->num_data * sizeof(score_t));
+    std::memcpy(state_->hess_buf->contents(), hessians_,
+                (size_t)state_->num_data * sizeof(score_t));
+  }
+}
+
+void MetalTreeLearner::RunMetalHistogram(const score_t* /*gradients*/,
+                                         const score_t* /*hessians*/,
                                          data_size_t num_data) {
-  // Full-data root path: copy g/h into shared buffers and run the un-indexed kernel.
-  std::memcpy(state_->grad_buf->contents(), gradients,
-              (size_t)num_data * sizeof(score_t));
-  std::memcpy(state_->hess_buf->contents(), hessians,
-              (size_t)num_data * sizeof(score_t));
+  // grad/hess are already in shared buffers (copied once in BeforeTrain).
 
   uint32_t nd = (uint32_t)num_data;
   uint32_t wg = (uint32_t)state_->wg_per_feat;
@@ -406,16 +415,13 @@ void MetalTreeLearner::RunMetalHistogram(const score_t* gradients,
 
 void MetalTreeLearner::RunMetalHistogramIndexed(const data_size_t* data_indices,
                                                 data_size_t num_idx) {
-  // gradients_/hessians_ are the unordered, global-row-indexed arrays — the
-  // kernel uses indices[j] to scatter-gather into them.
-  std::memcpy(state_->grad_buf->contents(), gradients_,
-              (size_t)state_->num_data * sizeof(score_t));
-  std::memcpy(state_->hess_buf->contents(), hessians_,
-              (size_t)state_->num_data * sizeof(score_t));
-  uint32_t* dst = static_cast<uint32_t*>(state_->idx_buf->contents());
-  for (data_size_t i = 0; i < num_idx; ++i) {
-    dst[i] = static_cast<uint32_t>(data_indices[i]);
-  }
+  // grad/hess already in shared buffers (BeforeTrain). Only the indices vary.
+  // data_size_t is a 32-bit signed int storing non-negative row indices, which
+  // is bitwise identical to uint32_t — memcpy is safe.
+  static_assert(sizeof(data_size_t) == sizeof(uint32_t),
+                "Metal indexed kernel assumes data_size_t is 32-bit.");
+  std::memcpy(state_->idx_buf->contents(), data_indices,
+              (size_t)num_idx * sizeof(uint32_t));
 
   uint32_t nd  = (uint32_t)state_->num_data;
   uint32_t ni  = (uint32_t)num_idx;

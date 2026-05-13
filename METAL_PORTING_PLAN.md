@@ -148,22 +148,20 @@ Inventory, plan, branch (`metal-backend`).
 
 ## End-to-end training benchmark
 
-Apple M4 Pro, 50 iters, `num_leaves=63`, deterministic:
+Apple M4 Pro, 50 iters, `num_leaves=63`, deterministic. After caching the
+grad/hess and indices copies (only memcpy once per tree, not per leaf):
 
 | Dataset            | CPU      | Metal    | Speedup | AUC parity |
 |--------------------|----------|----------|---------|------------|
-|   500k × 64        |  1.45s   |  1.57s¹  | 0.92×   | bit-exact  |
-|   500k × 128       |  2.39s   |  2.51s   | 0.95×   | bit-exact  |
-|   500k × 256       |  4.31s   |  3.47s   | **1.24×** | bit-exact |
-|   1M × 128 (30it)  |  2.71s   |  2.20s   | **1.23×** | bit-exact |
-
-¹ 64 features falls under the `LIGHTGBM_METAL_MIN_FEATURES=96` heuristic and
-runs on CPU; the small overhead is Metal init.
+|   500k × 64        |  1.59s   |  1.46s   | **1.09×** | bit-exact |
+|   500k × 128       |  2.58s   |  2.21s   | **1.17×** | bit-exact |
+|   500k × 256       |  4.25s   |  3.24s   | **1.31×** | bit-exact |
+|   1M × 128 (30it)  |  2.55s   |  1.97s   | **1.29×** | bit-exact |
 
 End-to-end speedup is more modest than the standalone-kernel benchmark (2-3×)
 because tree-building has substantial non-histogram work (split finding,
-score updates, …). Speedup grows with `num_features` and `num_data`; the
-crossover where Metal helps is roughly `num_features * num_data ≥ 1e8`.
+score updates, …). Default crossover heuristic
+(`LIGHTGBM_METAL_MIN_FEATURES=32`) keeps Metal active for almost everything.
 
 ### Phase 2.1 — actual Metal acceleration — DONE
 

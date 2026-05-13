@@ -40,6 +40,7 @@ class MetalTreeLearner : public SerialTreeLearner {
                               bool reset_multi_val_bin) override;
 
  protected:
+  void BeforeTrain() override;
   void ConstructHistograms(const std::vector<int8_t>& is_feature_used,
                            bool use_subtract) override;
 
