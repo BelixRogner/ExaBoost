@@ -395,6 +395,46 @@ def test_quantized_gradient_falls_back_cleanly():
     assert metal_auc == pytest.approx(cpu_auc, abs=0.001), (cpu_auc, metal_auc)
 
 
+def test_early_stopping_parity():
+    """Early stopping uses a validation set during training. Verifies the
+    Metal path works with the early-stopping callback path and stops at
+    similar iteration counts on cpu vs metal."""
+    X, y = make_classification(
+        n_samples=4_000, n_features=128, n_informative=20, random_state=18,
+    )
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.25, random_state=18
+    )
+    base = dict(
+        objective="binary", num_leaves=15, learning_rate=0.1,
+        verbosity=-1, deterministic=True, seed=42,
+    )
+
+    cpu_train = lgb.Dataset(X_train, y_train)
+    cpu_val = lgb.Dataset(X_test, y_test, reference=cpu_train)
+    cpu_bst = lgb.train(
+        dict(base, device_type="cpu"),
+        cpu_train, num_boost_round=200, valid_sets=[cpu_val],
+        callbacks=[lgb.early_stopping(stopping_rounds=10, verbose=False)],
+    )
+
+    metal_train = lgb.Dataset(X_train, y_train)
+    metal_val = lgb.Dataset(X_test, y_test, reference=metal_train)
+    metal_bst = lgb.train(
+        dict(base, device_type="metal"),
+        metal_train, num_boost_round=200, valid_sets=[metal_val],
+        callbacks=[lgb.early_stopping(stopping_rounds=10, verbose=False)],
+    )
+
+    # Best iterations should be close (atomic-ordering can cause slight
+    # divergence in best-iter choice).
+    assert abs(cpu_bst.best_iteration - metal_bst.best_iteration) <= 20, \
+        (cpu_bst.best_iteration, metal_bst.best_iteration)
+    cpu_auc = roc_auc_score(y_test, cpu_bst.predict(X_test))
+    metal_auc = roc_auc_score(y_test, metal_bst.predict(X_test))
+    assert metal_auc == pytest.approx(cpu_auc, abs=0.02), (cpu_auc, metal_auc)
+
+
 def test_multiple_models_same_process():
     """Train several distinct datasets sequentially with device_type=metal.
     Verifies the per-MetalTreeLearner state cleans up correctly and
