@@ -464,6 +464,10 @@ dask-worker-space/
 *.rdp
 *_rsa
 
-# Metal test venv
+# Metal test venv + build artifacts
 .venv-metal-test/
+.venv*/
+tools/metal_bench/latest_results.csv
+testlightgbm
+lightgbm-python/
 
