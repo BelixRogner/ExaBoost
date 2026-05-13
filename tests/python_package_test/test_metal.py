@@ -395,6 +395,26 @@ def test_quantized_gradient_falls_back_cleanly():
     assert metal_auc == pytest.approx(cpu_auc, abs=0.001), (cpu_auc, metal_auc)
 
 
+def test_max_bin_boundary():
+    """max_bin=255 puts each feature exactly at the 256-bin kernel boundary
+    (255 levels + 1 missing-value bin = 256 bins total). Verifies the
+    boundary case doesn't trip off-by-one bugs in the write-back loop."""
+    X, y = make_classification(
+        n_samples=4_000, n_features=128, n_informative=24, random_state=21,
+    )
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.25, random_state=21
+    )
+    cpu_pred, metal_pred = _train_both(
+        {"objective": "binary", "num_leaves": 31, "learning_rate": 0.1,
+         "max_bin": 255},
+        X_train, y_train, X_test, y_test, num_rounds=30,
+    )
+    cpu_auc = roc_auc_score(y_test, cpu_pred)
+    metal_auc = roc_auc_score(y_test, metal_pred)
+    assert metal_auc == pytest.approx(cpu_auc, abs=0.02), (cpu_auc, metal_auc)
+
+
 def test_model_save_load_cross_device():
     """Train on Metal, save model to disk, load with no device specified,
     predict — verify the saved model is device-agnostic (no Metal-specific
