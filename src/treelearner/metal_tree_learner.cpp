@@ -333,20 +333,21 @@ bool MetalTreeLearner::BuildDenseFeatureBuffer() {
     return false;
   }
 
-  if (num_groups != num_features) {
-    Log::Info("Metal: skipping acceleration (multi-feature groups detected).");
-    return false;
-  }
-  int max_num_bin = 0;
+  // Multi-feature groups (LightGBM packs narrow features together) are OK —
+  // FeatureIterator(f) abstracts the packing and we materialize a flat
+  // per-feature column buffer.
   for (int g = 0; g < num_groups; ++g) {
     if (train_data_->IsMultiGroup(g)) {
       Log::Info("Metal: skipping acceleration (multi-val feature group %d).", g);
       return false;
     }
-    int nb = train_data_->FeatureGroupNumBin(g);
+  }
+  int max_num_bin = 0;
+  for (int f = 0; f < num_features; ++f) {
+    int nb = train_data_->FeatureNumBin(f);
     if (nb > kMaxNumBins) {
-      Log::Info("Metal: skipping acceleration (group %d has %d bins, > %d).",
-                g, nb, kMaxNumBins);
+      Log::Info("Metal: skipping acceleration (feature %d has %d bins, > %d).",
+                f, nb, kMaxNumBins);
       return false;
     }
     if (nb > max_num_bin) max_num_bin = nb;
@@ -376,8 +377,11 @@ bool MetalTreeLearner::BuildDenseFeatureBuffer() {
   for (int f = 0; f < num_features; ++f) {
     std::unique_ptr<BinIterator> it(train_data_->FeatureIterator(f));
     uint8_t* col = feat_ptr + (size_t)f * num_data;
+    // Use Get() (not RawGet) so multi-feature groups give per-sub-feature bin
+    // values rather than the packed group byte. Get returns values in
+    // [offset, num_bin) for in-range rows, or most_freq_bin for out-of-range.
     for (data_size_t i = 0; i < num_data; ++i) {
-      col[i] = static_cast<uint8_t>(it->RawGet(i));
+      col[i] = static_cast<uint8_t>(it->Get(i));
     }
   }
 
@@ -522,18 +526,23 @@ void MetalTreeLearner::ConstructHistograms(const std::vector<int8_t>& is_feature
   }
 
   const float* metal_hist = static_cast<const float*>(state_->out_buf->contents());
-  hist_t* hist_base =
-      smaller_leaf_histogram_array_[0].RawData() - kHistOffset;
   const int num_features = train_data_->num_features();
+  // Per-feature write-back. smaller_leaf_histogram_array_[f].RawData() points
+  // at feature f's bin range, with a per-feature `offset` (0 or 1) that
+  // tells us how many leading bins the CPU code keeps implicit. The kernel
+  // always emits bins 0..num_bin-1; we copy bins offset..num_bin-1 into
+  // RawData[0..num_bin - offset - 1].
   #pragma omp parallel for schedule(static)
   for (int f = 0; f < num_features; ++f) {
     if (!is_feature_used[f]) continue;
-    const int num_bin = train_data_->FeatureGroupNumBin(f);
-    hist_t* dst = hist_base + 2 * train_data_->GroupBinBoundary(f);
+    const int num_bin = train_data_->FeatureNumBin(f);
+    const int offset =
+        (train_data_->FeatureBinMapper(f)->GetMostFreqBin() == 0) ? 1 : 0;
+    hist_t* dst = smaller_leaf_histogram_array_[f].RawData();
     const float* src = metal_hist + (size_t)f * state_->active_bins * 2;
-    for (int b = 0; b < num_bin; ++b) {
-      dst[2 * b + 0] = src[2 * b + 0];
-      dst[2 * b + 1] = src[2 * b + 1];
+    for (int b = offset; b < num_bin; ++b) {
+      dst[2 * (b - offset) + 0] = src[2 * b + 0];
+      dst[2 * (b - offset) + 1] = src[2 * b + 1];
     }
   }
 

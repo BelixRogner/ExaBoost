@@ -134,6 +134,43 @@ def test_regression_parity():
     assert metal_mse == pytest.approx(cpu_mse, rel=0.05), (cpu_mse, metal_mse)
 
 
+def test_binary_classification_multifeature_group_parity():
+    """Force LightGBM to pack features into multi-feature groups (low max_bin)
+    and verify cpu vs metal still match. Exercises the multi-feature-group
+    write-back path added in Phase 2.5."""
+    X, y = make_classification(
+        n_samples=3_000, n_features=128, n_informative=24, n_redundant=8,
+        random_state=4,
+    )
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.25, random_state=4
+    )
+
+    # max_bin=15 -> each feature has <=16 bins -> LightGBM packs 8 features
+    # per uint32 feature group.
+    params = {
+        "objective": "binary",
+        "num_leaves": 31,
+        "learning_rate": 0.1,
+        "max_bin": 15,
+    }
+    cpu_pred, metal_pred = _train_both(params, X_train, y_train, X_test, y_test)
+
+    cpu_auc   = roc_auc_score(y_test, cpu_pred)
+    metal_auc = roc_auc_score(y_test, metal_pred)
+    cpu_lbl   = (cpu_pred   > 0.5).astype(int)
+    metal_lbl = (metal_pred > 0.5).astype(int)
+    cpu_acc   = accuracy_score(y_test, cpu_lbl)
+    metal_acc = accuracy_score(y_test, metal_lbl)
+    cpu_f1    = f1_score(y_test, cpu_lbl)
+    metal_f1  = f1_score(y_test, metal_lbl)
+
+    assert metal_auc == pytest.approx(cpu_auc, abs=0.02), (cpu_auc, metal_auc)
+    assert metal_acc == pytest.approx(cpu_acc, abs=0.02), (cpu_acc, metal_acc)
+    assert metal_f1  == pytest.approx(cpu_f1,  abs=0.02), (cpu_f1,  metal_f1)
+    assert metal_auc > 0.7
+
+
 def test_metal_init_smoke():
     """Smoke test: Metal device initializes and produces a non-degenerate model."""
     X, y = make_classification(n_samples=500, n_features=16, random_state=3)
