@@ -22,8 +22,11 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
+#include <sys/stat.h>
 #include <vector>
 
 namespace LightGBM {
@@ -432,6 +435,12 @@ struct MetalTreeLearner::MetalState {
   };
   PerBinSize bs16, bs64, bs256;
 
+  // Shader-binary archive: persists compiled PSOs to disk so subsequent
+  // processes skip the MSL compile. nullptr if disabled or if archive
+  // creation fails.
+  MTL::BinaryArchive* archive = nullptr;
+  bool archive_was_fresh = false;  // true if we created (not loaded) the archive
+
   PerBinSize* active = nullptr;   // chosen at BuildDenseFeatureBuffer based on max_num_bin
   int active_bins = 0;            // 16 / 64 / 256
   int k_feats = 1;                // 1=default kernel, 2=multi-feature kernel
@@ -475,6 +484,7 @@ struct MetalTreeLearner::MetalState {
     rel(out_buf_larger); rel(partial_buf_larger);
     rel(gh_packed_buf); rel(partial_buf_i32); rel(out_buf_i32);
     ReleaseBinsize(&bs16); ReleaseBinsize(&bs64); ReleaseBinsize(&bs256);
+    rel(archive);
     rel(queue); rel(device);
   }
 };
@@ -521,6 +531,48 @@ void MetalTreeLearner::InitMetal() {
   }
   Log::Info("Metal device: %s", state_->device->name()->utf8String());
 
+  // Shader-binary archive: load existing if present, otherwise create fresh
+  // (we'll populate during PSO compilation and serialize at end of Init).
+  // Disable via LIGHTGBM_METAL_NO_BINARY_ARCHIVE=1 (e.g., if the cache
+  // is somehow corrupt and you want to force a recompile).
+  bool archive_enabled = true;
+  if (const char* env = std::getenv("LIGHTGBM_METAL_NO_BINARY_ARCHIVE")) {
+    if (env[0] == '1') archive_enabled = false;
+  }
+  std::string archive_path;
+  if (archive_enabled) {
+    const char* home = std::getenv("HOME");
+    if (home) {
+      archive_path = std::string(home) + "/.cache/exaboost";
+      // mkdir -p (no error if exists).
+      mkdir(archive_path.c_str(), 0755);
+      // Append a version suffix; bump when kernel source changes.
+      archive_path += "/metal_kernels_v1.binarchive";
+
+      auto desc = MTL::BinaryArchiveDescriptor::alloc()->init();
+      // Try to load existing file; if missing, leave url unset to create fresh.
+      struct stat st;
+      bool exists = (stat(archive_path.c_str(), &st) == 0);
+      if (exists) {
+        auto url = NS::URL::fileURLWithPath(
+            NS::String::string(archive_path.c_str(), NS::UTF8StringEncoding));
+        desc->setUrl(url);
+      }
+      NS::Error* err = nullptr;
+      state_->archive = state_->device->newBinaryArchive(desc, &err);
+      desc->release();
+      state_->archive_was_fresh = !exists;
+      if (!state_->archive) {
+        Log::Info("Metal: BinaryArchive %s unavailable (%s); will recompile.",
+                  exists ? "load" : "create",
+                  err ? err->localizedDescription()->utf8String() : "(unknown)");
+      } else {
+        Log::Info("Metal: BinaryArchive %s (%s).",
+                  exists ? "loaded" : "fresh", archive_path.c_str());
+      }
+    }
+  }
+
   // Compile the kernel three times — once each for 16/64/256-bin variants.
   auto compile_variant = [&](MetalState::PerBinSize* bs, int num_bins,
                              int num_subhist) -> bool {
@@ -549,7 +601,26 @@ void MetalTreeLearner::InitMetal() {
       if (!fn) { Log::Warning("Metal: missing kernel %s in NUM_BINS=%d library",
                               name, num_bins); return nullptr; }
       NS::Error* err2 = nullptr;
-      auto p = state_->device->newComputePipelineState(fn, &err2);
+      MTL::ComputePipelineState* p = nullptr;
+      if (state_->archive) {
+        // Use a ComputePipelineDescriptor with the archive attached so Metal
+        // reuses cached binaries or registers a freshly-compiled PSO.
+        auto pso_desc = MTL::ComputePipelineDescriptor::alloc()->init();
+        pso_desc->setComputeFunction(fn);
+        const MTL::BinaryArchive* arcs[1] = { state_->archive };
+        auto arr = NS::Array::array((const NS::Object* const*)arcs, 1);
+        pso_desc->setBinaryArchives(arr);
+        p = state_->device->newComputePipelineState(
+            pso_desc, MTL::PipelineOptionNone, nullptr, &err2);
+        if (p && state_->archive_was_fresh) {
+          NS::Error* add_err = nullptr;
+          state_->archive->addComputePipelineFunctions(pso_desc, &add_err);
+          // Non-fatal if add fails; we'll just not cache this one.
+        }
+        pso_desc->release();
+      } else {
+        p = state_->device->newComputePipelineState(fn, &err2);
+      }
       fn->release();
       if (!p) Log::Warning("Metal: PSO creation failed (%s, NUM_BINS=%d): %s",
                            name, num_bins,
@@ -573,6 +644,22 @@ void MetalTreeLearner::InitMetal() {
   if (!ok) {
     Log::Warning("Metal: kernel compile incomplete. Falling back to CPU path.");
     return;
+  }
+
+  // Serialize the archive to disk if we just populated it. Subsequent
+  // processes will load from this file and skip the MSL compile.
+  if (state_->archive && state_->archive_was_fresh && !archive_path.empty()) {
+    auto url = NS::URL::fileURLWithPath(
+        NS::String::string(archive_path.c_str(), NS::UTF8StringEncoding));
+    NS::Error* serr = nullptr;
+    bool ok2 = state_->archive->serializeToURL(url, &serr);
+    if (!ok2) {
+      Log::Info("Metal: BinaryArchive save to %s failed: %s",
+                archive_path.c_str(),
+                serr ? serr->localizedDescription()->utf8String() : "(unknown)");
+    } else {
+      Log::Info("Metal: BinaryArchive saved to %s.", archive_path.c_str());
+    }
   }
 
   state_->queue = state_->device->newCommandQueue();
