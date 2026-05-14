@@ -51,6 +51,12 @@ class MetalTreeLearner : public SerialTreeLearner {
   void RunMetalHistogram(const score_t* gradients, const score_t* hessians,
                          data_size_t num_data);
   void RunMetalHistogramIndexed(const data_size_t* data_indices, data_size_t num_idx);
+  // Sibling-batching variant: dispatch BOTH smaller-leaf and larger-leaf
+  // histograms in one command buffer + one waitUntilCompleted. Used for the
+  // use_subtract=false path where we'd otherwise pay sync overhead twice.
+  void RunMetalHistogramSibling(
+      const data_size_t* smaller_indices, data_size_t smaller_n,
+      const data_size_t* larger_indices,  data_size_t larger_n);
   // Quantized variants: read int8 packed grad+hess, produce int32 histograms.
   // Caller is responsible for staging gh_packed_buf before calling.
   void RunMetalHistogramQ32(data_size_t num_data);

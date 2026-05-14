@@ -441,8 +441,15 @@ struct MetalTreeLearner::MetalState {
   MTL::Buffer* grad_buf     = nullptr;  // float [num_data]
   MTL::Buffer* hess_buf     = nullptr;  // float [num_data]
   MTL::Buffer* idx_buf      = nullptr;  // uint  [num_data]
+  MTL::Buffer* idx_buf_larger = nullptr;  // larger-leaf indices for sibling batching
   MTL::Buffer* partial_buf  = nullptr;  // float [num_features * wg_per_feat * 2*active_bins]
   MTL::Buffer* out_buf      = nullptr;  // float [num_features * 2*active_bins]
+  // Second output buffer for the sibling-leaf path: when !use_subtract we
+  // dispatch BOTH smaller and larger leaf in one command buffer to amortize
+  // the waitUntilCompleted overhead. They need distinct destinations so
+  // the second kernel doesn't clobber the first.
+  MTL::Buffer* out_buf_larger = nullptr;  // float [num_features * 2*active_bins]
+  MTL::Buffer* partial_buf_larger = nullptr;
   // Quantized variant buffers (allocated only when use_quantized_grad).
   MTL::Buffer* gh_packed_buf  = nullptr;  // int8  [2 * num_data] packed grad+hess
   MTL::Buffer* partial_buf_i32 = nullptr; // int32 [num_features * wg_per_feat * 2*active_bins]
@@ -463,8 +470,9 @@ struct MetalTreeLearner::MetalState {
 
   ~MetalState() {
     auto rel = [](auto*& p) { if (p) { p->release(); p = nullptr; } };
-    rel(feat_buf); rel(grad_buf); rel(hess_buf); rel(idx_buf);
+    rel(feat_buf); rel(grad_buf); rel(hess_buf); rel(idx_buf); rel(idx_buf_larger);
     rel(partial_buf); rel(out_buf);
+    rel(out_buf_larger); rel(partial_buf_larger);
     rel(gh_packed_buf); rel(partial_buf_i32); rel(out_buf_i32);
     ReleaseBinsize(&bs16); ReleaseBinsize(&bs64); ReleaseBinsize(&bs256);
     rel(queue); rel(device);
@@ -709,10 +717,18 @@ bool MetalTreeLearner::BuildDenseFeatureBuffer() {
   state_->out_buf = state_->device->newBuffer(
       (size_t)num_features * state_->active_bins * 2 * sizeof(float),
       MTL::ResourceStorageModeShared);
+  state_->out_buf_larger = state_->device->newBuffer(
+      (size_t)num_features * state_->active_bins * 2 * sizeof(float),
+      MTL::ResourceStorageModeShared);
+  state_->partial_buf_larger = state_->device->newBuffer(
+      (size_t)num_features * (size_t)state_->wg_per_feat * state_->active_bins * 2 * sizeof(float),
+      MTL::ResourceStorageModePrivate);
   // Pre-allocate the indices buffer to avoid per-call allocation. Sized for
   // the worst case (all rows in a leaf).
   state_->idx_buf = state_->device->newBuffer((size_t)num_data * sizeof(uint32_t),
                                               MTL::ResourceStorageModeShared);
+  state_->idx_buf_larger = state_->device->newBuffer((size_t)num_data * sizeof(uint32_t),
+                                                      MTL::ResourceStorageModeShared);
   // Quantized buffers when use_quantized_grad is enabled. Same shape as the
   // float buffers but int32-element-typed.
   if (config_->use_quantized_grad) {
@@ -856,6 +872,97 @@ void MetalTreeLearner::RunMetalHistogramIndexed(const data_size_t* data_indices,
   enc->endEncoding();
   cb->commit();
   cb->waitUntilCompleted();
+  if (g_timings.enabled) {
+    double gpu_s = cb->GPUEndTime() - cb->GPUStartTime();
+    if (gpu_s > 0) g_timings.gpu_us.fetch_add((uint64_t)(gpu_s * 1e6));
+  }
+}
+
+void MetalTreeLearner::RunMetalHistogramSibling(
+    const data_size_t* smaller_indices, data_size_t smaller_n,
+    const data_size_t* larger_indices,  data_size_t larger_n) {
+  // grad/hess are in shared buffers (BeforeTrain). Stage both index arrays.
+  static_assert(sizeof(data_size_t) == sizeof(uint32_t),
+                "Metal sibling kernel assumes data_size_t is 32-bit.");
+  const bool smaller_full = (smaller_indices == nullptr || smaller_n == state_->num_data);
+  const bool larger_full  = (larger_indices  == nullptr || larger_n  == state_->num_data);
+  if (!smaller_full) {
+    std::memcpy(state_->idx_buf->contents(), smaller_indices,
+                (size_t)smaller_n * sizeof(uint32_t));
+  }
+  if (!larger_full) {
+    std::memcpy(state_->idx_buf_larger->contents(), larger_indices,
+                (size_t)larger_n * sizeof(uint32_t));
+  }
+
+  uint32_t nd = (uint32_t)state_->num_data;
+  uint32_t wg = (uint32_t)state_->wg_per_feat;
+  uint32_t ns = (uint32_t)smaller_n;
+  uint32_t nl = (uint32_t)larger_n;
+  const bool one_wg = (state_->wg_per_feat == 1);
+  MTL::Buffer* part_dst_s = one_wg ? state_->out_buf        : state_->partial_buf;
+  MTL::Buffer* part_dst_l = one_wg ? state_->out_buf_larger : state_->partial_buf_larger;
+
+  MTL::CommandBuffer* cb = state_->queue->commandBuffer();
+  MTL::ComputeCommandEncoder* enc = cb->computeCommandEncoder();
+
+  // --- Smaller leaf ---
+  enc->setBuffer(state_->feat_buf, 0, 0);
+  enc->setBuffer(state_->grad_buf, 0, 1);
+  enc->setBuffer(state_->hess_buf, 0, 2);
+  enc->setBuffer(part_dst_s, 0, 3);
+  enc->setBytes(&nd, sizeof(uint32_t), 4);
+  enc->setBytes(&wg, sizeof(uint32_t), 5);
+  if (smaller_full) {
+    enc->setComputePipelineState(state_->active->pso_partial);
+  } else {
+    enc->setComputePipelineState(state_->active->pso_partial_indexed);
+    enc->setBuffer(state_->idx_buf, 0, 6);
+    enc->setBytes(&ns, sizeof(uint32_t), 7);
+  }
+  enc->dispatchThreadgroups(
+      MTL::Size::Make(state_->wg_per_feat, state_->num_metal_features, 1),
+      MTL::Size::Make(kThreadsPerGroup, 1, 1));
+  if (!one_wg) {
+    enc->setComputePipelineState(state_->active->pso_reduce);
+    enc->setBuffer(state_->partial_buf, 0, 0);
+    enc->setBuffer(state_->out_buf, 0, 1);
+    enc->setBytes(&wg, sizeof(uint32_t), 2);
+    enc->dispatchThreadgroups(
+        MTL::Size::Make(state_->num_metal_features, 1, 1),
+        MTL::Size::Make(state_->active_bins, 1, 1));
+  }
+
+  // --- Larger leaf (writes to a SEPARATE out_buf so smaller's data isn't clobbered) ---
+  enc->setBuffer(state_->feat_buf, 0, 0);
+  enc->setBuffer(state_->grad_buf, 0, 1);
+  enc->setBuffer(state_->hess_buf, 0, 2);
+  enc->setBuffer(part_dst_l, 0, 3);
+  enc->setBytes(&nd, sizeof(uint32_t), 4);
+  enc->setBytes(&wg, sizeof(uint32_t), 5);
+  if (larger_full) {
+    enc->setComputePipelineState(state_->active->pso_partial);
+  } else {
+    enc->setComputePipelineState(state_->active->pso_partial_indexed);
+    enc->setBuffer(state_->idx_buf_larger, 0, 6);
+    enc->setBytes(&nl, sizeof(uint32_t), 7);
+  }
+  enc->dispatchThreadgroups(
+      MTL::Size::Make(state_->wg_per_feat, state_->num_metal_features, 1),
+      MTL::Size::Make(kThreadsPerGroup, 1, 1));
+  if (!one_wg) {
+    enc->setComputePipelineState(state_->active->pso_reduce);
+    enc->setBuffer(state_->partial_buf_larger, 0, 0);
+    enc->setBuffer(state_->out_buf_larger, 0, 1);
+    enc->setBytes(&wg, sizeof(uint32_t), 2);
+    enc->dispatchThreadgroups(
+        MTL::Size::Make(state_->num_metal_features, 1, 1),
+        MTL::Size::Make(state_->active_bins, 1, 1));
+  }
+
+  enc->endEncoding();
+  cb->commit();
+  cb->waitUntilCompleted();  // ONE wait for both leaves
   if (g_timings.enabled) {
     double gpu_s = cb->GPUEndTime() - cb->GPUStartTime();
     if (gpu_s > 0) g_timings.gpu_us.fetch_add((uint64_t)(gpu_s * 1e6));
@@ -1018,7 +1125,19 @@ void MetalTreeLearner::ConstructHistograms(const std::vector<int8_t>& is_feature
 
   auto t_disp0 = g_timings.enabled ? std::chrono::steady_clock::now()
                                    : std::chrono::steady_clock::time_point();
-  if (data_indices == nullptr || leaf_num_data == state_->num_data) {
+  // Sibling-batched path: when we need BOTH leaves' histograms (use_subtract
+  // is false and there's a larger leaf), dispatch both in one command
+  // buffer to amortize the waitUntilCompleted overhead. ~one wait instead
+  // of two.
+  const bool sibling_batched =
+      !use_subtract && larger_leaf_histogram_array_ != nullptr &&
+      larger_leaf_splits_ != nullptr && larger_leaf_splits_->leaf_index() >= 0;
+  if (sibling_batched) {
+    const data_size_t larger_num_data = larger_leaf_splits_->num_data_in_leaf();
+    const data_size_t* larger_indices = larger_leaf_splits_->data_indices();
+    RunMetalHistogramSibling(data_indices, leaf_num_data,
+                             larger_indices, larger_num_data);
+  } else if (data_indices == nullptr || leaf_num_data == state_->num_data) {
     // Root-leaf, full-data path: run the un-indexed kernel.
     RunMetalHistogram(gradients_, hessians_, state_->num_data);
   } else {
@@ -1027,7 +1146,6 @@ void MetalTreeLearner::ConstructHistograms(const std::vector<int8_t>& is_feature
   }
   if (g_timings.enabled) {
     auto t1 = std::chrono::steady_clock::now();
-    // dispatch_us absorbs idx_copy too — we subtract that below if it ran.
     g_timings.dispatch_us.fetch_add(
         std::chrono::duration_cast<std::chrono::microseconds>(t1 - t_disp0).count());
     g_timings.calls.fetch_add(1);
@@ -1117,18 +1235,24 @@ void MetalTreeLearner::ConstructHistograms(const std::vector<int8_t>& is_feature
     return;  // CPU already produced larger leaf if needed.
   }
 
-  // Larger leaf is computed via subtract in the caller when use_subtract=true
-  // (typical case). Otherwise (mostly at the root where there's no parent
-  // histogram to subtract from), build the larger leaf on Metal too.
+  // Larger-leaf path: when use_subtract=true, the caller computes the
+  // larger histogram via the subtract trick. When sibling_batched fired,
+  // the larger leaf's histogram is already in out_buf_larger from the
+  // batched dispatch — just write it back.
   if (larger_leaf_histogram_array_ != nullptr && !use_subtract) {
-    const data_size_t larger_num_data = larger_leaf_splits_->num_data_in_leaf();
-    const data_size_t* larger_indices = larger_leaf_splits_->data_indices();
-    if (larger_indices == nullptr || larger_num_data == state_->num_data) {
-      RunMetalHistogram(gradients_, hessians_, state_->num_data);
-    } else {
-      RunMetalHistogramIndexed(larger_indices, larger_num_data);
+    const float* metal_hist2 = sibling_batched
+        ? static_cast<const float*>(state_->out_buf_larger->contents())
+        : nullptr;
+    if (!sibling_batched) {
+      const data_size_t larger_num_data = larger_leaf_splits_->num_data_in_leaf();
+      const data_size_t* larger_indices = larger_leaf_splits_->data_indices();
+      if (larger_indices == nullptr || larger_num_data == state_->num_data) {
+        RunMetalHistogram(gradients_, hessians_, state_->num_data);
+      } else {
+        RunMetalHistogramIndexed(larger_indices, larger_num_data);
+      }
+      metal_hist2 = static_cast<const float*>(state_->out_buf->contents());
     }
-    const float* metal_hist2 = static_cast<const float*>(state_->out_buf->contents());
     const bool parallel_writeback2 = num_features >= 256;
     auto write_back_larger = [&](int f) {
       if (!is_feature_used[f]) return;
