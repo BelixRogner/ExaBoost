@@ -18,6 +18,7 @@ from .basic import (
     LightGBMError,
     _choose_param_value,
     _ConfigAliases,
+    _is_pyarrow_array,
     _LGBM_BoosterBestScoreType,
     _LGBM_CategoricalFeatureConfiguration,
     _LGBM_EvalFunctionResultType,
@@ -1595,6 +1596,17 @@ class LGBMClassifier(_LGBMClassifierBase, LGBMModel):
         eval_y: Optional[Union[_LGBM_LabelType, Tuple[_LGBM_LabelType]]] = None,
     ) -> "LGBMClassifier":
         """Docstring is inherited from the LGBMModel."""
+        # sklearn's check_classification_targets / LabelEncoder route through
+        # narwhals in recent versions and raise TypeError on a bare pyarrow
+        # Array / ChunkedArray ("Please set `allow_series=True`...") because
+        # sklearn does not pass that flag. Convert eagerly to numpy on this
+        # side so the downstream sklearn calls see a familiar 1-D array.
+        if _is_pyarrow_array(y):
+            # np.asarray goes through pyarrow's __array__ and works on both
+            # pa.Array and pa.ChunkedArray across every supported pyarrow
+            # version (ChunkedArray.to_numpy(zero_copy_only=...) is unavailable
+            # on the oldest pyarrow we still test against).
+            y = np.asarray(y)
         _LGBMAssertAllFinite(y)
         _LGBMCheckClassificationTargets(y)
         self._le = _LGBMLabelEncoder().fit(y)
