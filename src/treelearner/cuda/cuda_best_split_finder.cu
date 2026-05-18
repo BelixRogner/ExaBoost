@@ -17,6 +17,30 @@
 
 namespace LightGBM {
 
+// Relative tolerance for gain-tie detection in the best-split reductions.
+// Two gains within this relative band are treated as a plateau; the
+// reduction tie-breaks to the lower thread index, which corresponds to
+// the lower bin index — matching CPU's "first bin in scan order wins"
+// behaviour. Sized at ~5000x fp64 epsilon, well above the ~1e-15
+// reduction-order noise we observe in CUDA histograms but well below
+// any genuine gain difference seen in practice. Without this, ULP-level
+// FP noise causes CPU and CUDA to pick different bins from a true gain
+// plateau, which seeds the round-3+ structural divergence in cases like
+// reg_bagging and multi_dense.
+#define BEST_GAIN_TIE_RELATIVE_TOL 1e-12
+
+__device__ __forceinline__ bool OtherIsBetterWithTieBreak(
+    double other_gain, double gain, uint32_t other_thread_index, uint32_t thread_index) {
+  const double tol = fmax(fabs(gain), fabs(other_gain)) * BEST_GAIN_TIE_RELATIVE_TOL;
+  if (other_gain > gain + tol) {
+    return true;
+  }
+  if (fabs(other_gain - gain) <= tol && other_thread_index < thread_index) {
+    return true;
+  }
+  return false;
+}
+
 __device__ void ReduceBestGainWarp(double gain, bool found, uint32_t thread_index, double* out_gain, bool* out_found, uint32_t* out_thread_index) {
   const uint32_t mask = 0xffffffff;
   const uint32_t warpLane = threadIdx.x % warpSize;
@@ -24,7 +48,8 @@ __device__ void ReduceBestGainWarp(double gain, bool found, uint32_t thread_inde
     const bool other_found = __shfl_down_sync(mask, found, offset);
     const double other_gain = __shfl_down_sync(mask, gain, offset);
     const uint32_t other_thread_index = __shfl_down_sync(mask, thread_index, offset);
-    if ((other_found && found && other_gain > gain) || (!found && other_found)) {
+    const bool other_better = OtherIsBetterWithTieBreak(other_gain, gain, other_thread_index, thread_index);
+    if ((other_found && found && other_better) || (!found && other_found)) {
       found = other_found;
       gain = other_gain;
       thread_index = other_thread_index;
@@ -43,7 +68,8 @@ __device__ uint32_t ReduceBestGainBlock(double gain, bool found, uint32_t thread
     const bool other_found = __shfl_down_sync(mask, found, offset);
     const double other_gain = __shfl_down_sync(mask, gain, offset);
     const uint32_t other_thread_index = __shfl_down_sync(mask, thread_index, offset);
-    if ((other_found && found && other_gain > gain) || (!found && other_found)) {
+    const bool other_better = OtherIsBetterWithTieBreak(other_gain, gain, other_thread_index, thread_index);
+    if ((other_found && found && other_better) || (!found && other_found)) {
       found = other_found;
       gain = other_gain;
       thread_index = other_thread_index;
