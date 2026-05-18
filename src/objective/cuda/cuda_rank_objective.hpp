@@ -93,6 +93,10 @@ class CUDALambdarankNDCG: public CUDALambdaRankObjectiveInterface<LambdarankNDCG
   // CUDA memory, held by this object
   CUDAVector<double> cuda_inverse_max_dcgs_;
   CUDAVector<double> cuda_label_gain_;
+
+  // When true, the gradient kernel runs on a deterministic code path that
+  // avoids order-dependent atomicAdd_block accumulation.
+  bool deterministic_ = false;
 };
 
 

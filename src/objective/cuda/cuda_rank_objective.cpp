@@ -14,7 +14,8 @@
 
 namespace LightGBM {
 
-CUDALambdarankNDCG::CUDALambdarankNDCG(const Config& config): CUDALambdaRankObjectiveInterface<LambdarankNDCG>(config) {}
+CUDALambdarankNDCG::CUDALambdarankNDCG(const Config& config)
+    : CUDALambdaRankObjectiveInterface<LambdarankNDCG>(config), deterministic_(config.deterministic) {}
 
 CUDALambdarankNDCG::CUDALambdarankNDCG(const std::vector<std::string>& strs): CUDALambdaRankObjectiveInterface<LambdarankNDCG>(strs) {}
 

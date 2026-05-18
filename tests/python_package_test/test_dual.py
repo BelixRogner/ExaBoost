@@ -65,6 +65,72 @@ def test_cuda_init_score_matches_cpu(objective, alpha, n):
     assert cuda == pytest.approx(cpu, abs=1e-6), f"{objective} alpha={alpha} n={n}: cpu={cpu} cuda={cuda}"
 
 
+_REQUIRES_CUDA = pytest.mark.skipif(
+    os.environ.get("TASK", "") != "cuda",
+    reason="requires CUDA-enabled LightGBM build (set TASK=cuda)",
+)
+
+
+@_REQUIRES_CUDA
+@pytest.mark.parametrize("items_per_query", [50, 1500])
+def test_cuda_lambdarank_deterministic_is_bit_identical_run_to_run(items_per_query):
+    """Regression test for LambdaRank gradient kernel run-to-run determinism.
+
+    The non-deterministic kernel scatters per-pair gradient and hessian
+    contributions into shared memory via atomicAdd_block. Different runs
+    interleave those atomics in different orders, and floating-point
+    addition is non-associative, so the per-slot sums (and hence the
+    boosted tree) are not bit-identical across runs.
+
+    With deterministic=True the kernel switches to a CUB BlockReduce-based
+    code path that accumulates each output slot in a fixed (i, j) order
+    without atomics. Output should then be bit-identical across runs.
+
+    Two parametrized values cover both code paths:
+      - items_per_query=50  -> BitonicArgSort_1024 path
+      - items_per_query=1500 -> BitonicArgSort_2048 path
+    """
+    rng = np.random.default_rng(7)
+    n_queries = max(2, 600 // items_per_query)
+    n = n_queries * items_per_query
+    n_features = 8
+    X = rng.standard_normal((n, n_features)).astype(np.float64)
+    coef = rng.standard_normal(n_features)
+    score = X @ coef
+    quantiles = np.quantile(score, [0.2, 0.4, 0.6, 0.8])
+    y = np.digitize(score, quantiles).astype(np.int32)
+    group = np.full(n_queries, items_per_query, dtype=np.int32)
+
+    base = {
+        "objective": "lambdarank",
+        "metric": "ndcg",
+        "device_type": "cuda",
+        "verbose": -1,
+        "deterministic": True,
+        "num_threads": 1,
+        "seed": 7,
+        "feature_pre_filter": False,
+        "gpu_use_dp": True,
+        "num_leaves": 8,
+        "learning_rate": 0.1,
+        "min_data_in_leaf": 3,
+    }
+
+    preds = []
+    for _ in range(3):
+        ds = lgb.Dataset(X, label=y, group=group, params={"verbose": -1, "feature_pre_filter": False})
+        bst = lgb.train(base, ds, num_boost_round=5)
+        preds.append(bst.predict(X, raw_score=True))
+
+    # Bit-identical across all three runs.
+    for i, p in enumerate(preds[1:], start=1):
+        assert np.array_equal(p, preds[0]), (
+            f"deterministic=True LambdaRank produced non-identical output between run 0 and run {i} "
+            f"(max|Δ|={float(np.abs(p - preds[0]).max()):.3e}); "
+            f"items_per_query={items_per_query}."
+        )
+
+
 @pytest.mark.skipif(
     os.environ.get("LIGHTGBM_TEST_DUAL_CPU_GPU", "0") != "1",
     reason="Set LIGHTGBM_TEST_DUAL_CPU_GPU=1 to test using CPU and GPU training from the same package.",
