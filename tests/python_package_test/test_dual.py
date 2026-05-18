@@ -83,7 +83,7 @@ def _train_cpu_and_cuda(params_overrides, X, y, num_round):
 
 @_REQUIRES_CUDA
 @pytest.mark.parametrize(
-    "name,params_overrides,seed,num_round",
+    ("name", "params_overrides", "seed", "num_round"),
     [
         # Regression test for the gain-plateau argmax bug. Bagging configuration
         # was the original failure: max|Δ|=0.39 at round 3, structurally
