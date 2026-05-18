@@ -671,6 +671,7 @@ __device__ void FindBestSplitsForLeafKernelCategoricalInner(
       const data_size_t right_count = num_data - left_count;
       if (sum_left_hessian >= min_sum_hessian_in_leaf && left_count >= min_data_in_leaf &&
         sum_right_hessian >= min_sum_hessian_in_leaf && right_count >= min_data_in_leaf &&
+        left_count >= min_data_per_group && right_count >= min_data_per_group &&
         (!USE_RAND || threadIdx_x == static_cast<int>(rand_threshold))) {
         double current_gain = CUDALeafSplits::GetSplitGains<USE_L1, USE_SMOOTHING>(
           sum_left_gradient, sum_left_hessian, sum_right_gradient,
@@ -710,6 +711,7 @@ __device__ void FindBestSplitsForLeafKernelCategoricalInner(
       const data_size_t right_count = num_data - left_count;
       if (sum_left_hessian >= min_sum_hessian_in_leaf && left_count >= min_data_in_leaf &&
         sum_right_hessian >= min_sum_hessian_in_leaf && right_count >= min_data_in_leaf &&
+        left_count >= min_data_per_group && right_count >= min_data_per_group &&
         (!USE_RAND || threadIdx_x == static_cast<int>(rand_threshold))) {
         double current_gain = CUDALeafSplits::GetSplitGains<USE_L1, USE_SMOOTHING>(
           sum_left_gradient, sum_left_hessian, sum_right_gradient,
@@ -1465,7 +1467,8 @@ __device__ void FindBestSplitsForLeafKernelCategoricalInner_GlobalMemory(
       const double sum_right_hessian = sum_hessians - sum_left_hessian;
       const data_size_t right_count = num_data - left_count;
       if (sum_left_hessian >= min_sum_hessian_in_leaf && left_count >= min_data_in_leaf &&
-        sum_right_hessian >= min_sum_hessian_in_leaf && right_count >= min_data_in_leaf) {
+        sum_right_hessian >= min_sum_hessian_in_leaf && right_count >= min_data_in_leaf &&
+        left_count >= min_data_per_group && right_count >= min_data_per_group) {
         double current_gain = CUDALeafSplits::GetSplitGains<USE_L1, USE_SMOOTHING>(
           sum_left_gradient, sum_left_hessian, sum_right_gradient,
           sum_right_hessian, lambda_l1,
@@ -1504,7 +1507,8 @@ __device__ void FindBestSplitsForLeafKernelCategoricalInner_GlobalMemory(
       const double sum_right_hessian = sum_hessians - sum_left_hessian;
       const data_size_t right_count = num_data - left_count;
       if (sum_left_hessian >= min_sum_hessian_in_leaf && left_count >= min_data_in_leaf &&
-        sum_right_hessian >= min_sum_hessian_in_leaf && right_count >= min_data_in_leaf) {
+        sum_right_hessian >= min_sum_hessian_in_leaf && right_count >= min_data_in_leaf &&
+        left_count >= min_data_per_group && right_count >= min_data_per_group) {
         double current_gain = CUDALeafSplits::GetSplitGains<USE_L1, USE_SMOOTHING>(
           sum_left_gradient, sum_left_hessian, sum_right_gradient,
           sum_right_hessian, lambda_l1,
