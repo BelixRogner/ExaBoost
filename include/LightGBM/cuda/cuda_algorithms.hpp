@@ -244,7 +244,20 @@ __device__ __forceinline__ void BitonicArgSort_1024(const VAL_T* scores, INDEX_T
       if (threadIdx.x < num_items_aligend) {
         if (half_segment_index % 2 == 0) {
           const INDEX_T index_to_compare = threadIdx.x + half_segment_length;
-          if ((scores[indices[threadIdx.x]] > scores[indices[index_to_compare]]) == ascending) {
+          // Use strict comparison so ties (equal scores) are not swapped.
+          // The original `(a > b) == ascending` swapped for `a == b` when
+          // ascending=false (because false == false), so descending sort was
+          // not stable and reordered tied items. CPU's std::stable_sort never
+          // swaps ties; matching that here keeps LambdaRank gradients
+          // bit-identical with CPU on round 1 (where all scores are zero).
+          // Use the per-pass `ascending` local (which alternates by outer
+          // segment index) -- not the template parameter `ASCENDING` -- so
+          // the bitonic merge still pulls a bitonic sequence into a monotone
+          // one for inputs with non-tied values.
+          const bool need_swap = ascending
+              ? (scores[indices[threadIdx.x]] > scores[indices[index_to_compare]])
+              : (scores[indices[threadIdx.x]] < scores[indices[index_to_compare]]);
+          if (need_swap) {
             const INDEX_T index = indices[threadIdx.x];
             indices[threadIdx.x] = indices[index_to_compare];
             indices[index_to_compare] = index;
@@ -269,7 +282,11 @@ __device__ __forceinline__ void BitonicArgSort_2048(const VAL_T* scores, INDEX_T
         const INDEX_T half_segment_index = threadIdx.x / half_segment_length;
         if (half_segment_index % 2 == 0) {
           const INDEX_T index_to_compare = threadIdx.x + half_segment_length + base;
-          if ((scores[indices[threadIdx.x + base]] > scores[indices[index_to_compare]]) == ascending) {
+          // Strict comparison so ties are not swapped (see BitonicArgSort_1024).
+          const bool need_swap = ascending
+              ? (scores[indices[threadIdx.x + base]] > scores[indices[index_to_compare]])
+              : (scores[indices[threadIdx.x + base]] < scores[indices[index_to_compare]]);
+          if (need_swap) {
             const INDEX_T index = indices[threadIdx.x + base];
             indices[threadIdx.x + base] = indices[index_to_compare];
             indices[index_to_compare] = index;
