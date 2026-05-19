@@ -72,7 +72,9 @@ class CUDABestSplitFinder {
     const score_t* grad_scale,
     const score_t* hess_scale,
     const uint8_t smaller_num_bits_in_histogram_bins,
-    const uint8_t larger_num_bits_in_histogram_bins);
+    const uint8_t larger_num_bits_in_histogram_bins,
+    const bool smaller_leaf_below_max_depth,
+    const bool larger_leaf_below_max_depth);
 
   const CUDASplitInfo* FindBestFromAllSplits(
     const int cur_num_leaves,
