@@ -314,3 +314,39 @@ def test_cuda_l1_median_handles_small_even_and_odd_leaves(n):
                 f"{device_type} n={n} leaf {li} (size {int(mask.sum())}): "
                 f"expected np.median={expected:.10f}, got {actual:.10f}"
             )
+
+
+@_REQUIRES_CUDA
+@pytest.mark.parametrize(
+    "cegb_overrides",
+    [
+        {"cegb_penalty_split": 5.0},
+        {"cegb_penalty_feature_coupled": [5.0, 5.0, 5.0, 5.0, 5.0, 5.0]},
+        {"cegb_penalty_feature_lazy": [5.0, 5.0, 5.0, 5.0, 5.0, 5.0]},
+        {"cegb_tradeoff": 0.5, "cegb_penalty_split": 1.0},
+    ],
+)
+def test_cuda_cegb_raises(cegb_overrides):
+    """CUDA must reject cost-effective gradient boosting instead of ignoring it.
+
+    The cegb_* penalties are applied only in the CPU serial tree learner
+    (CostEfficientGradientBoosting). The CUDA learner has no equivalent, so on
+    CUDA the penalties were silently dropped. CPU must keep honoring CEGB.
+    """
+    rng = np.random.RandomState(0)
+    X = rng.rand(400, 6)
+    y = 3 * X[:, 0] + 2 * X[:, 1] - X[:, 2] + 0.1 * rng.rand(400)
+
+    base = {
+        "objective": "regression",
+        "num_leaves": 31,
+        "min_data_in_leaf": 1,
+        "min_gain_to_split": 0.0,
+        "verbose": -1,
+        **cegb_overrides,
+    }
+
+    lgb.train(dict(base, device_type="cpu"), lgb.Dataset(X, label=y, params={"verbose": -1}), num_boost_round=1)
+
+    with pytest.raises(lgb.basic.LightGBMError, match="cost-effective"):
+        lgb.train(dict(base, device_type="cuda"), lgb.Dataset(X, label=y, params={"verbose": -1}), num_boost_round=1)
