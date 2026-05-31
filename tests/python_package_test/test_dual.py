@@ -314,3 +314,35 @@ def test_cuda_l1_median_handles_small_even_and_odd_leaves(n):
                 f"{device_type} n={n} leaf {li} (size {int(mask.sum())}): "
                 f"expected np.median={expected:.10f}, got {actual:.10f}"
             )
+
+
+@_REQUIRES_CUDA
+@pytest.mark.parametrize("max_delta_step", [0.05, 0.1, 1.0])
+def test_cuda_max_delta_step_raises(max_delta_step):
+    """CUDA must reject max_delta_step instead of silently ignoring it.
+
+    The max_delta_step leaf-output clamp is applied only in the CPU
+    FeatureHistogram (CalculateSplittedLeafOutput with USE_MAX_OUTPUT). The CUDA
+    leaf-output kernels have no equivalent, so on CUDA max_delta_step was
+    silently ignored and leaf values / split gains diverged from CPU. CPU must
+    keep honoring it.
+    """
+    rng = np.random.RandomState(0)
+    X = rng.rand(400, 6)
+    y = (X[:, 0] + 0.4 * rng.rand(400) > 0.6).astype(int)
+
+    base = {
+        "objective": "binary",
+        "max_delta_step": max_delta_step,
+        "num_leaves": 15,
+        "min_data_in_leaf": 1,
+        "learning_rate": 1.0,
+        "verbose": -1,
+    }
+
+    # CPU honors max_delta_step and trains successfully.
+    lgb.train(dict(base, device_type="cpu"), lgb.Dataset(X, label=y, params={"verbose": -1}), num_boost_round=1)
+
+    # CUDA must raise rather than silently ignore the clamp.
+    with pytest.raises(lgb.basic.LightGBMError, match="max_delta_step"):
+        lgb.train(dict(base, device_type="cuda"), lgb.Dataset(X, label=y, params={"verbose": -1}), num_boost_round=1)

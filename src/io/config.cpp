@@ -421,6 +421,14 @@ void Config::CheckParamConflict(const std::unordered_map<std::string, std::strin
     if (deterministic) {
       Log::Warning("Although \"deterministic\" is set, the results ran by GPU may be non-deterministic.");
     }
+    // The leaf-output clamp for max_delta_step is implemented only in the CPU
+    // FeatureHistogram (the CUDA leaf-output kernels have no equivalent term), so
+    // on CUDA max_delta_step would be silently ignored and leaf values / split
+    // gains would diverge from CPU. Fail fast until it is implemented on GPU.
+    if (max_delta_step > 0.0) {
+      Log::Fatal("CUDA tree learner does not support max_delta_step. "
+                 "Run with device_type=cpu to use max_delta_step.");
+    }
   }
   // linear tree learner must be serial type and run on CPU device
   if (linear_tree) {
