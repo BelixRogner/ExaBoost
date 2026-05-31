@@ -314,3 +314,45 @@ def test_cuda_l1_median_handles_small_even_and_odd_leaves(n):
                 f"{device_type} n={n} leaf {li} (size {int(mask.sum())}): "
                 f"expected np.median={expected:.10f}, got {actual:.10f}"
             )
+
+
+@_REQUIRES_CUDA
+@pytest.mark.parametrize("feature_contri", [[0.0, 1.0, 1.0, 1.0], [1.0, 1.0, 1.0, 0.0]])
+def test_cuda_feature_contri_raises(feature_contri):
+    """CUDA must reject feature_contri instead of silently ignoring it.
+
+    feature_contri scales each feature's split gain by max(0, contri[f]); this is
+    applied only in the CPU FeatureHistogram (output->gain *= meta_->penalty). The
+    CUDA best-split finder has no equivalent multiplier, so on CUDA the parameter
+    was silently ignored and split selection diverged from CPU. CPU must keep
+    honoring it (a feature with contri 0 is never split on).
+    """
+    rng = np.random.RandomState(5)
+    X = rng.rand(500, 4)
+    zero_feat = feature_contri.index(0.0)
+    y = 5 * X[:, zero_feat] + 0.1 * rng.rand(500)
+
+    base = {
+        "objective": "regression",
+        "feature_contri": feature_contri,
+        "num_leaves": 15,
+        "min_data_in_leaf": 1,
+        "verbose": -1,
+    }
+
+    cpu_bst = lgb.train(dict(base, device_type="cpu"), lgb.Dataset(X, label=y, params={"verbose": -1}), num_boost_round=5)
+    used = set()
+
+    def _collect(node):
+        if "leaf_value" in node:
+            return
+        used.add(node["split_feature"])
+        _collect(node["left_child"])
+        _collect(node["right_child"])
+
+    for tree in cpu_bst.dump_model()["tree_info"]:
+        _collect(tree["tree_structure"])
+    assert zero_feat not in used
+
+    with pytest.raises(lgb.basic.LightGBMError, match="feature_contri"):
+        lgb.train(dict(base, device_type="cuda"), lgb.Dataset(X, label=y, params={"verbose": -1}), num_boost_round=5)

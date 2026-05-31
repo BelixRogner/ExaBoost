@@ -421,6 +421,15 @@ void Config::CheckParamConflict(const std::unordered_map<std::string, std::strin
     if (deterministic) {
       Log::Warning("Although \"deterministic\" is set, the results ran by GPU may be non-deterministic.");
     }
+    // The per-feature gain scaling for feature_contri is applied only in the CPU
+    // FeatureHistogram (output->gain *= meta_->penalty). The CUDA best-split
+    // finder has no equivalent multiplier, so on CUDA feature_contri would be
+    // silently ignored and split selection would diverge from CPU. Fail fast
+    // until it is implemented on GPU.
+    if (!feature_contri.empty()) {
+      Log::Fatal("CUDA tree learner does not support feature_contri. "
+                 "Run with device_type=cpu to use feature_contri.");
+    }
   }
   // linear tree learner must be serial type and run on CPU device
   if (linear_tree) {
