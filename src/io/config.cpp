@@ -421,6 +421,10 @@ void Config::CheckParamConflict(const std::unordered_map<std::string, std::strin
     if (deterministic) {
       Log::Warning("Although \"deterministic\" is set, the results ran by GPU may be non-deterministic.");
     }
+    if (!monotone_constraints.empty()) {
+      Log::Fatal("CUDA tree learner does not support monotone constraints. "
+                 "Run with device_type=cpu to use monotone_constraints.");
+    }
   }
   // linear tree learner must be serial type and run on CPU device
   if (linear_tree) {

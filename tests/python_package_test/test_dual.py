@@ -314,3 +314,36 @@ def test_cuda_l1_median_handles_small_even_and_odd_leaves(n):
                 f"{device_type} n={n} leaf {li} (size {int(mask.sum())}): "
                 f"expected np.median={expected:.10f}, got {actual:.10f}"
             )
+
+
+@_REQUIRES_CUDA
+@pytest.mark.parametrize("constraints", [[1, 0, 0], [-1, 0, 0], [1, -1, 0], [0, 0, 1]])
+def test_cuda_monotone_constraints_raises(constraints):
+    """CUDA must reject monotone_constraints instead of silently ignoring them.
+
+    The CUDA tree learner does not implement monotone-constraint enforcement
+    (the best-split finder never consults the constraint min/max ranges), so a
+    CUDA model trained with monotone_constraints would silently violate the
+    requested monotonic relationship. Until enforcement is implemented on GPU,
+    the configuration must fail loudly. CPU training with the same constraints
+    must continue to work.
+    """
+    rng = np.random.RandomState(0)
+    X = rng.rand(200, 3)
+    y = 5 * X[:, 0] - 5 * X[:, 1] + 0.5 * rng.rand(200)
+
+    # CPU honors monotone_constraints and trains successfully.
+    cpu_params = {
+        "objective": "regression",
+        "device_type": "cpu",
+        "monotone_constraints": constraints,
+        "num_leaves": 15,
+        "min_data_in_leaf": 1,
+        "verbose": -1,
+    }
+    lgb.train(cpu_params, lgb.Dataset(X, label=y, params={"verbose": -1}), num_boost_round=3)
+
+    # CUDA must raise rather than silently produce a non-monotonic model.
+    cuda_params = dict(cpu_params, device_type="cuda")
+    with pytest.raises(lgb.basic.LightGBMError, match="monotone"):
+        lgb.train(cuda_params, lgb.Dataset(X, label=y, params={"verbose": -1}), num_boost_round=3)
