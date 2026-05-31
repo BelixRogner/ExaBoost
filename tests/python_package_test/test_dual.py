@@ -3,6 +3,7 @@
 
 import contextlib
 import io
+import json
 import os
 import platform
 
@@ -314,3 +315,49 @@ def test_cuda_l1_median_handles_small_even_and_odd_leaves(n):
                 f"{device_type} n={n} leaf {li} (size {int(mask.sum())}): "
                 f"expected np.median={expected:.10f}, got {actual:.10f}"
             )
+
+
+@_REQUIRES_CUDA
+def test_cuda_forced_splits_raises(tmp_path):
+    """CUDA must reject forcedsplits_filename instead of silently ignoring it.
+
+    ForceSplits is only implemented in SerialTreeLearner::Train; the CUDA tree
+    learner overrides Train and never applies the forced-split JSON, so on CUDA
+    the forced splits were silently dropped. CPU honors them and must keep
+    working.
+    """
+    rng = np.random.RandomState(0)
+    X = rng.rand(400, 6)
+    y = 3 * X[:, 0] + 2 * X[:, 1] - X[:, 2] + 0.1 * rng.rand(400)
+
+    forced = {
+        "feature": 2,
+        "threshold": 0.5,
+        "left": {"feature": 2, "threshold": 0.25},
+        "right": {"feature": 2, "threshold": 0.75},
+    }
+    fn = tmp_path / "forced_splits.json"
+    fn.write_text(json.dumps(forced))
+
+    base = {
+        "objective": "regression",
+        "forcedsplits_filename": str(fn),
+        "num_leaves": 8,
+        "min_data_in_leaf": 1,
+        "verbose": -1,
+    }
+
+    cpu_bst = lgb.train(
+        dict(base, device_type="cpu"),
+        lgb.Dataset(X, label=y, params={"verbose": -1}),
+        num_boost_round=1,
+    )
+    root = cpu_bst.dump_model()["tree_info"][0]["tree_structure"]
+    assert root["split_feature"] == 2
+
+    with pytest.raises(lgb.basic.LightGBMError, match="forced split"):
+        lgb.train(
+            dict(base, device_type="cuda"),
+            lgb.Dataset(X, label=y, params={"verbose": -1}),
+            num_boost_round=1,
+        )
