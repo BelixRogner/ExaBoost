@@ -28,6 +28,9 @@ namespace LightGBM {
 
 struct SplitFindTask {
   int inner_feature_index;
+  // monotone constraint for the (real) feature underlying this task:
+  // -1 decreasing, +1 increasing, 0 none. Always 0 for categorical tasks.
+  int8_t monotone_type;
   bool reverse;
   bool skip_default_bin;
   bool na_as_missing;
@@ -74,7 +77,11 @@ class CUDABestSplitFinder {
     const uint8_t smaller_num_bits_in_histogram_bins,
     const uint8_t larger_num_bits_in_histogram_bins,
     const bool smaller_leaf_below_max_depth,
-    const bool larger_leaf_below_max_depth);
+    const bool larger_leaf_below_max_depth,
+    const double smaller_leaf_constraint_min,
+    const double smaller_leaf_constraint_max,
+    const double larger_leaf_constraint_min,
+    const double larger_leaf_constraint_max);
 
   const CUDASplitInfo* FindBestFromAllSplits(
     const int cur_num_leaves,
@@ -108,7 +115,11 @@ class CUDABestSplitFinder {
     const bool is_smaller_leaf_valid, \
     const bool is_larger_leaf_valid, \
     const data_size_t global_num_data_in_smaller_leaf, \
-    const data_size_t global_num_data_in_larger_leaf
+    const data_size_t global_num_data_in_larger_leaf, \
+    const double smaller_leaf_constraint_min, \
+    const double smaller_leaf_constraint_max, \
+    const double larger_leaf_constraint_min, \
+    const double larger_leaf_constraint_max
 
   void LaunchFindBestSplitsForLeafKernel(LaunchFindBestSplitsForLeafKernel_PARAMS);
 
@@ -214,6 +225,11 @@ class CUDABestSplitFinder {
   std::vector<int8_t> is_categorical_;
   // whether need to select features by node
   bool select_features_by_node_;
+  // whether monotone constraints are active (basic method, host-tracked)
+  bool use_monotone_constraints_;
+  // per-inner-feature monotone constraint (indexed by inner feature index),
+  // value taken from config->monotone_constraints[RealFeatureIndex(inner)]
+  std::vector<int8_t> monotone_constraints_;
 
   // CUDA memory, held by this object
   // for per leaf best split information

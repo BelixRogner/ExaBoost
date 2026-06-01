@@ -88,6 +88,14 @@ class CUDASingleGPUTreeLearner: public SerialTreeLearner, public NCCLInfo {
 
   void NCCLReduceHistogram();
 
+  // Mirror of BasicLeafConstraints::Update for the CUDA path. Given a just-applied
+  // numerical split on `inner_feature_index`, the parent leaf (`left_leaf`) and the
+  // newly created leaf (`right_leaf`), and the (clamped) child outputs, update the
+  // host-side per-leaf [min,max] constraint arrays.
+  void UpdateLeafConstraints(
+    const int left_leaf, const int right_leaf, const int inner_feature_index,
+    const double left_value, const double right_value, const bool is_numerical_split);
+
   // number of threads on CPU
   int num_threads_;
 
@@ -112,6 +120,14 @@ class CUDASingleGPUTreeLearner: public SerialTreeLearner, public NCCLInfo {
   std::vector<data_size_t> leaf_data_start_;
   std::vector<double> leaf_sum_gradients_;
   std::vector<double> leaf_sum_hessians_;
+  // host-side per-leaf monotone constraints (basic method). [-DBL_MAX, +DBL_MAX]
+  // means unconstrained. Empty/unused when monotone_constraints is not set.
+  std::vector<double> leaf_constraint_min_;
+  std::vector<double> leaf_constraint_max_;
+  // per-inner-feature monotone constraint, mapped from the real-indexed
+  // config_->monotone_constraints; empty when monotone_constraints is not set.
+  std::vector<int8_t> monotone_constraints_;
+  bool use_monotone_constraints_;
   int smaller_leaf_index_;
   int larger_leaf_index_;
   int best_leaf_index_;
