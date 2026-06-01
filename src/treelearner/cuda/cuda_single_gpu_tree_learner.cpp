@@ -17,6 +17,9 @@
 
 #include <algorithm>
 #include <memory>
+#include <queue>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace LightGBM {
@@ -183,7 +186,9 @@ Tree* CUDASingleGPUTreeLearner::Train(const score_t* gradients,
     config_->lambda_l1, config_->lambda_l2,  config_->path_smooth,
     static_cast<data_size_t>(num_data_), 0));
   tree->SyncLeafOutputFromHostToCUDA();
-  for (int i = 0; i < config_->num_leaves - 1; ++i) {
+  int num_splits_done = 0;
+  ForceSplitsCUDA(tree.get(), &num_splits_done);
+  for (int i = num_splits_done; i < config_->num_leaves - 1; ++i) {
     global_timer.Start("CUDASingleGPUTreeLearner::ConstructHistogramForLeaf");
     const data_size_t global_num_data_in_smaller_leaf = nccl_communicator_ != nullptr ?
       global_num_data_in_leaf_[smaller_leaf_index_] :
@@ -333,50 +338,7 @@ Tree* CUDASingleGPUTreeLearner::Train(const score_t* gradients,
       ConstructBitsetForCategoricalSplit(best_split_info);
     }
 
-    int right_leaf_index = 0;
-    if (train_data_->FeatureBinMapper(leaf_best_split_feature_[best_leaf_index_])->bin_type() == BinType::CategoricalBin) {
-      right_leaf_index = tree->SplitCategorical(best_leaf_index_,
-                                       train_data_->RealFeatureIndex(leaf_best_split_feature_[best_leaf_index_]),
-                                       train_data_->FeatureBinMapper(leaf_best_split_feature_[best_leaf_index_])->missing_type(),
-                                       best_split_info,
-                                       cuda_bitset_,
-                                       cuda_bitset_len_,
-                                       cuda_bitset_inner_,
-                                       cuda_bitset_inner_len_);
-    } else {
-      right_leaf_index = tree->Split(best_leaf_index_,
-                                       train_data_->RealFeatureIndex(leaf_best_split_feature_[best_leaf_index_]),
-                                       train_data_->RealThreshold(leaf_best_split_feature_[best_leaf_index_],
-                                        leaf_best_split_threshold_[best_leaf_index_]),
-                                       train_data_->FeatureBinMapper(leaf_best_split_feature_[best_leaf_index_])->missing_type(),
-                                       best_split_info);
-    }
-
-    cuda_data_partition_->Split(best_split_info,
-                                best_leaf_index_,
-                                right_leaf_index,
-                                leaf_best_split_feature_[best_leaf_index_],
-                                leaf_best_split_threshold_[best_leaf_index_],
-                                cuda_bitset_inner_,
-                                static_cast<int>(cuda_bitset_inner_len_),
-                                leaf_best_split_default_left_[best_leaf_index_],
-                                leaf_num_data_[best_leaf_index_],
-                                leaf_data_start_[best_leaf_index_],
-                                cuda_smaller_leaf_splits_->GetCUDAStructRef(),
-                                cuda_larger_leaf_splits_->GetCUDAStructRef(),
-                                &leaf_num_data_[best_leaf_index_],
-                                &leaf_num_data_[right_leaf_index],
-                                &leaf_data_start_[best_leaf_index_],
-                                &leaf_data_start_[right_leaf_index],
-                                &leaf_sum_hessians_[best_leaf_index_],
-                                &leaf_sum_hessians_[right_leaf_index],
-                                &leaf_sum_gradients_[best_leaf_index_],
-                                &leaf_sum_gradients_[right_leaf_index],
-                                global_num_data_in_leaf_.data() + best_leaf_index_,
-                                global_num_data_in_leaf_.data() + right_leaf_index);
-    #ifdef DEBUG
-    CheckSplitValid(best_leaf_index_, right_leaf_index);
-    #endif  // DEBUG
+    const int right_leaf_index = ApplySplit(tree.get(), best_split_info, best_leaf_index_);
 
     if (nccl_communicator_ != nullptr) {
       smaller_leaf_index_ = (global_num_data_in_leaf_[best_leaf_index_] < global_num_data_in_leaf_[right_leaf_index] ? best_leaf_index_ : right_leaf_index);
@@ -407,6 +369,212 @@ Tree* CUDASingleGPUTreeLearner::Train(const score_t* gradients,
   }
   tree->ToHost();
   return tree.release();
+}
+
+int CUDASingleGPUTreeLearner::ApplySplit(CUDATree* tree, const CUDASplitInfo* best_split_info, const int leaf_index) {
+  int right_leaf_index = 0;
+  if (train_data_->FeatureBinMapper(leaf_best_split_feature_[leaf_index])->bin_type() == BinType::CategoricalBin) {
+    right_leaf_index = tree->SplitCategorical(leaf_index,
+                                     train_data_->RealFeatureIndex(leaf_best_split_feature_[leaf_index]),
+                                     train_data_->FeatureBinMapper(leaf_best_split_feature_[leaf_index])->missing_type(),
+                                     best_split_info,
+                                     cuda_bitset_,
+                                     cuda_bitset_len_,
+                                     cuda_bitset_inner_,
+                                     cuda_bitset_inner_len_);
+  } else {
+    right_leaf_index = tree->Split(leaf_index,
+                                     train_data_->RealFeatureIndex(leaf_best_split_feature_[leaf_index]),
+                                     train_data_->RealThreshold(leaf_best_split_feature_[leaf_index],
+                                      leaf_best_split_threshold_[leaf_index]),
+                                     train_data_->FeatureBinMapper(leaf_best_split_feature_[leaf_index])->missing_type(),
+                                     best_split_info);
+  }
+
+  cuda_data_partition_->Split(best_split_info,
+                              leaf_index,
+                              right_leaf_index,
+                              leaf_best_split_feature_[leaf_index],
+                              leaf_best_split_threshold_[leaf_index],
+                              cuda_bitset_inner_,
+                              static_cast<int>(cuda_bitset_inner_len_),
+                              leaf_best_split_default_left_[leaf_index],
+                              leaf_num_data_[leaf_index],
+                              leaf_data_start_[leaf_index],
+                              cuda_smaller_leaf_splits_->GetCUDAStructRef(),
+                              cuda_larger_leaf_splits_->GetCUDAStructRef(),
+                              &leaf_num_data_[leaf_index],
+                              &leaf_num_data_[right_leaf_index],
+                              &leaf_data_start_[leaf_index],
+                              &leaf_data_start_[right_leaf_index],
+                              &leaf_sum_hessians_[leaf_index],
+                              &leaf_sum_hessians_[right_leaf_index],
+                              &leaf_sum_gradients_[leaf_index],
+                              &leaf_sum_gradients_[right_leaf_index],
+                              global_num_data_in_leaf_.data() + leaf_index,
+                              global_num_data_in_leaf_.data() + right_leaf_index);
+  #ifdef DEBUG
+  CheckSplitValid(leaf_index, right_leaf_index);
+  #endif  // DEBUG
+  return right_leaf_index;
+}
+
+int CUDASingleGPUTreeLearner::ForceSplitsCUDA(CUDATree* tree, int* num_splits_done) {
+  *num_splits_done = 0;
+  if (forced_split_json_ == nullptr || forced_split_json_->is_null()) {
+    return 0;
+  }
+  if (config_->use_quantized_grad || nccl_communicator_ != nullptr) {
+    Log::Warning("Forced splits on CUDA are not supported with quantized gradients or multi-GPU. "
+                 "Ignoring forcedsplits_filename for this tree.");
+    return 0;
+  }
+  // BFS over the forced-split JSON, mirroring SerialTreeLearner::ForceSplits.
+  // Each iteration: construct histograms + run the regular best-split search for the
+  // active (smaller, larger) pair (so every forced leaf gets a valid cached best split
+  // for the main loop), sync the host-side best-split arrays with the device cache,
+  // compute forced split infos for pending JSON nodes whose target leaves are active,
+  // then pop one entry and apply its (already computed) forced split.
+  int result_count = 0;
+  std::queue<std::pair<Json, int>> q;
+  q.push(std::make_pair(*forced_split_json_, 0));
+  struct ForcedSplitEntry {
+    const CUDASplitInfo* device_info;
+    CUDASplitInfo host_info;
+    int inner_feature_index;
+    uint32_t threshold_bin;
+  };
+  std::unordered_map<int, ForcedSplitEntry> force_split_map;
+  while (!q.empty()) {
+    const data_size_t num_data_in_smaller_leaf = leaf_num_data_[smaller_leaf_index_];
+    const data_size_t num_data_in_larger_leaf = larger_leaf_index_ < 0 ? 0 : leaf_num_data_[larger_leaf_index_];
+    const double sum_hessians_in_smaller_leaf = leaf_sum_hessians_[smaller_leaf_index_];
+    const double sum_hessians_in_larger_leaf = larger_leaf_index_ < 0 ? 0 : leaf_sum_hessians_[larger_leaf_index_];
+    cuda_histogram_constructor_->ConstructHistogramForLeaf(
+      cuda_smaller_leaf_splits_->GetCUDAStruct(),
+      cuda_larger_leaf_splits_->GetCUDAStruct(),
+      num_data_in_smaller_leaf,
+      num_data_in_larger_leaf,
+      num_data_in_smaller_leaf,
+      num_data_in_larger_leaf,
+      sum_hessians_in_smaller_leaf,
+      sum_hessians_in_larger_leaf,
+      0);
+    cuda_histogram_constructor_->SubtractHistogramForLeaf(
+      cuda_smaller_leaf_splits_->GetCUDAStruct(),
+      cuda_larger_leaf_splits_->GetCUDAStruct(),
+      false, 0, 0, 0);
+    // regular best-split search for the active pair: populates the device per-leaf cache
+    SelectFeatureByNode(tree);
+    cuda_best_split_finder_->FindBestSplitsForLeaf(
+      cuda_smaller_leaf_splits_->GetCUDAStruct(),
+      cuda_larger_leaf_splits_->GetCUDAStruct(),
+      smaller_leaf_index_, larger_leaf_index_,
+      num_data_in_smaller_leaf, num_data_in_larger_leaf,
+      sum_hessians_in_smaller_leaf, sum_hessians_in_larger_leaf,
+      nullptr, nullptr, 0, 0,
+      config_->max_depth <= 0 || tree->leaf_depth(smaller_leaf_index_) < config_->max_depth,
+      larger_leaf_index_ < 0 || config_->max_depth <= 0 ||
+        tree->leaf_depth(larger_leaf_index_) < config_->max_depth);
+    // sync host-side best-split arrays with the device cache for the searched pair, so
+    // the main loop's FindBestFromAllSplits can pick these leaves later with consistent
+    // host (feature, threshold) and device (gain, sums) information
+    cuda_best_split_finder_->SyncLeafBestSplitToHost(
+      smaller_leaf_index_, larger_leaf_index_,
+      &leaf_best_split_feature_[smaller_leaf_index_],
+      &leaf_best_split_threshold_[smaller_leaf_index_],
+      &leaf_best_split_default_left_[smaller_leaf_index_],
+      larger_leaf_index_ >= 0 ? &leaf_best_split_feature_[larger_leaf_index_] : nullptr,
+      larger_leaf_index_ >= 0 ? &leaf_best_split_threshold_[larger_leaf_index_] : nullptr,
+      larger_leaf_index_ >= 0 ? &leaf_best_split_default_left_[larger_leaf_index_] : nullptr);
+
+    // compute forced split info for every pending JSON node whose target leaf is active
+    auto compute_for = [&](const Json& node_json, const int leaf_index) {
+      if (node_json.is_null() ||
+          node_json.object_items().count("feature") == 0 ||
+          node_json.object_items().count("threshold") == 0) {
+        return;
+      }
+      const int real_feature_index = node_json["feature"].int_value();
+      const double threshold_double = node_json["threshold"].number_value();
+      const int inner_feature_index = train_data_->InnerFeatureIndex(real_feature_index);
+      if (inner_feature_index < 0) {
+        Log::Warning("Forced split feature %d not in training data; skipping.", real_feature_index);
+        return;
+      }
+      if (train_data_->FeatureBinMapper(inner_feature_index)->bin_type() == BinType::CategoricalBin) {
+        Log::Warning("Forced splits on categorical features are not supported on CUDA; skipping feature %d.",
+                     real_feature_index);
+        return;
+      }
+      const uint32_t threshold_bin = train_data_->BinThreshold(inner_feature_index, threshold_double);
+      const bool is_smaller = (leaf_index == smaller_leaf_index_);
+      const CUDALeafSplitsStruct* leaf_struct = is_smaller ?
+        cuda_smaller_leaf_splits_->GetCUDAStruct() : cuda_larger_leaf_splits_->GetCUDAStruct();
+      ForcedSplitEntry entry;
+      entry.inner_feature_index = inner_feature_index;
+      entry.threshold_bin = threshold_bin;
+      entry.device_info = cuda_best_split_finder_->ComputeForcedSplit(
+        leaf_struct, inner_feature_index, threshold_bin, leaf_num_data_[leaf_index],
+        leaf_index, &entry.host_info);
+      if (entry.device_info == nullptr || !entry.host_info.is_valid) {
+        Log::Warning("'Forced Split' will be ignored since the gain getting worse.");
+        return;
+      }
+      force_split_map[leaf_index] = entry;
+    };
+    {
+      std::queue<std::pair<Json, int>> q_copy = q;
+      while (!q_copy.empty()) {
+        const std::pair<Json, int>& pending = q_copy.front();
+        const int leaf_index = pending.second;
+        if ((leaf_index == smaller_leaf_index_ || leaf_index == larger_leaf_index_ ||
+             (larger_leaf_index_ < 0 && leaf_index == 0)) &&
+            force_split_map.find(leaf_index) == force_split_map.end()) {
+          compute_for(pending.first, leaf_index);
+        }
+        q_copy.pop();
+      }
+    }
+
+    std::pair<Json, int> pair = q.front();
+    q.pop();
+    const int current_leaf = pair.second;
+    auto it = force_split_map.find(current_leaf);
+    if (it == force_split_map.end()) {
+      // forced split for this leaf was invalid / unsupported: stop forcing (mirrors CPU abort)
+      break;
+    }
+    const ForcedSplitEntry& entry = it->second;
+    leaf_best_split_feature_[current_leaf] = entry.inner_feature_index;
+    leaf_best_split_threshold_[current_leaf] = entry.threshold_bin;
+    leaf_best_split_default_left_[current_leaf] = 1;
+    num_cat_threshold_ = 0;
+    const int right_leaf_index = ApplySplit(tree, entry.device_info, current_leaf);
+    force_split_map.erase(current_leaf);
+    // both children's cached entries (host + device) describe the pre-split leaf:
+    // invalidate the device entries; the host arrays will be overwritten when the
+    // children are next searched and synced.
+    cuda_best_split_finder_->InvalidateLeafBestSplit(current_leaf, right_leaf_index);
+    smaller_leaf_index_ = (leaf_num_data_[current_leaf] < leaf_num_data_[right_leaf_index] ?
+      current_leaf : right_leaf_index);
+    larger_leaf_index_ = (smaller_leaf_index_ == current_leaf ? right_leaf_index : current_leaf);
+    ++result_count;
+    if (pair.first.object_items().count("left") > 0) {
+      const Json& left = pair.first["left"];
+      if (left.object_items().count("feature") > 0 && left.object_items().count("threshold") > 0) {
+        q.push(std::make_pair(left, current_leaf));
+      }
+    }
+    if (pair.first.object_items().count("right") > 0) {
+      const Json& right = pair.first["right"];
+      if (right.object_items().count("feature") > 0 && right.object_items().count("threshold") > 0) {
+        q.push(std::make_pair(right, right_leaf_index));
+      }
+    }
+  }
+  *num_splits_done = result_count;
+  return result_count;
 }
 
 void CUDASingleGPUTreeLearner::ResetTrainingData(
