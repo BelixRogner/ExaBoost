@@ -40,6 +40,7 @@ CUDABestSplitFinder::CUDABestSplitFinder(
   num_total_bin_(feature_hist_offsets.empty() ? 0 : static_cast<int>(feature_hist_offsets.back())),
   select_features_by_node_(select_features_by_node),
   cuda_hist_(cuda_hist) {
+  feature_contri_ = config->feature_contri;
   InitFeatureMetaInfo(train_data);
   if (has_categorical_feature_ && config->use_quantized_grad) {
     Log::Fatal("Quantized training on GPU with categorical features is not supported yet.");
@@ -58,6 +59,7 @@ void CUDABestSplitFinder::InitFeatureMetaInfo(const Dataset* train_data) {
   feature_mfb_offsets_.resize(num_features_);
   feature_default_bins_.resize(num_features_);
   feature_num_bins_.resize(num_features_);
+  real_feature_index_.resize(num_features_);
   max_num_bin_in_feature_ = 0;
   has_categorical_feature_ = false;
   max_num_categorical_bin_ = 0;
@@ -76,6 +78,7 @@ void CUDABestSplitFinder::InitFeatureMetaInfo(const Dataset* train_data) {
     feature_mfb_offsets_[inner_feature_index] = static_cast<int8_t>(bin_mapper->GetMostFreqBin() == 0);
     feature_default_bins_[inner_feature_index] = bin_mapper->GetDefaultBin();
     feature_num_bins_[inner_feature_index] = static_cast<uint32_t>(bin_mapper->num_bin());
+    real_feature_index_[inner_feature_index] = train_data->RealFeatureIndex(inner_feature_index);
     const int num_bin_hist = bin_mapper->num_bin() - feature_mfb_offsets_[inner_feature_index];
     if (num_bin_hist > max_num_bin_in_feature_) {
       max_num_bin_in_feature_ = num_bin_hist;
@@ -106,6 +109,25 @@ void CUDABestSplitFinder::Init() {
   if (select_features_by_node_) {
     is_feature_used_by_smaller_node_.Resize(num_features_);
     is_feature_used_by_larger_node_.Resize(num_features_);
+  }
+}
+
+double CUDABestSplitFinder::GetFeaturePenalty(int inner_feature_index) const {
+  // Mirror CPU FeatureMetainfo::penalty (feature_histogram.hpp): the
+  // penalty defaults to 1.0 and otherwise equals config->feature_contri
+  // indexed by the REAL feature index. The CPU code at this commit uses
+  // the raw value (no max(0, .)), so we mirror that exactly.
+  if (feature_contri_.empty()) {
+    return 1.0;
+  }
+  const int real_feature_index = real_feature_index_[inner_feature_index];
+  return feature_contri_[real_feature_index];
+}
+
+void CUDABestSplitFinder::SetTaskFeaturePenalties() {
+  for (size_t task_index = 0; task_index < split_find_tasks_.size(); ++task_index) {
+    split_find_tasks_[task_index].penalty =
+        GetFeaturePenalty(split_find_tasks_[task_index].inner_feature_index);
   }
 }
 
@@ -220,6 +242,8 @@ void CUDABestSplitFinder::InitCUDAFeatureMetaInfo() {
   }
   CHECK_EQ(cur_task_index, static_cast<int>(split_find_tasks_.size()));
 
+  SetTaskFeaturePenalties();
+
   if (extra_trees_) {
     cuda_randoms_.Resize(num_tasks_ * 2);
     LaunchInitCUDARandomKernel();
@@ -279,6 +303,14 @@ void CUDABestSplitFinder::ResetConfig(const Config* config, const hist_t* cuda_h
   use_smoothing_ = (config->path_smooth > 0.0f);
   path_smooth_ = config->path_smooth;
   cuda_hist_ = cuda_hist;
+
+  feature_contri_ = config->feature_contri;
+  SetTaskFeaturePenalties();
+  CopyFromHostToCUDADevice<SplitFindTask>(cuda_split_find_tasks_.RawData(),
+                                          split_find_tasks_.data(),
+                                          split_find_tasks_.size(),
+                                          __FILE__,
+                                          __LINE__);
 
   const int num_task_blocks = (num_tasks_ + NUM_TASKS_PER_SYNC_BLOCK - 1) / NUM_TASKS_PER_SYNC_BLOCK;
   size_t cuda_best_leaf_split_info_buffer_size = static_cast<size_t>(num_task_blocks) * static_cast<size_t>(num_leaves_);
