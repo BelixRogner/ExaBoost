@@ -296,7 +296,77 @@ void CUDABestSplitFinder::ResetConfig(const Config* config, const hist_t* cuda_h
   AllocateCatVectors(cuda_best_split_info_.RawData(), cuda_cat_threshold_feature_.RawData(), cuda_cat_threshold_real_feature_.RawData(), cuda_best_leaf_split_info_buffer_size);
 }
 
+void CUDABestSplitFinder::SetCEGB(
+  const std::vector<double>& cegb_penalty_feature_coupled,
+  const double cegb_tradeoff,
+  const double cegb_penalty_split,
+  const Dataset* train_data) {
+  cegb_tradeoff_ = cegb_tradeoff;
+  cegb_tradeoff_times_penalty_split_ = cegb_tradeoff * cegb_penalty_split;
+  cegb_penalty_feature_coupled_ = cegb_penalty_feature_coupled;
+  // Active iff there is a split penalty or a (non-empty) coupled penalty.
+  // cegb_tradeoff by itself only rescales penalties, so with both penalties zero
+  // there is nothing to subtract.
+  cegb_use_ = (cegb_tradeoff_times_penalty_split_ != 0.0) ||
+              !cegb_penalty_feature_coupled_.empty();
+  if (!cegb_use_) {
+    return;
+  }
+  // real_fidx for each task (parallel to split_find_tasks_).
+  cegb_task_real_fidx_.resize(num_tasks_);
+  for (int task_index = 0; task_index < num_tasks_; ++task_index) {
+    const int inner_feature_index = split_find_tasks_[task_index].inner_feature_index;
+    cegb_task_real_fidx_[task_index] = train_data->RealFeatureIndex(inner_feature_index);
+  }
+  // is_feature_used_in_split_ accumulates over the WHOLE model (it is reset only
+  // here, at session init, never per tree -- mirroring the CPU path where
+  // CostEfficientGradientBoosting::Init() guards the clear with `if (!init_)` and
+  // BeforeTrain() only resets splits_per_leaf_). A feature pays its coupled penalty
+  // once, the first time it is used in any tree.
+  cegb_is_feature_used_in_split_.assign(num_features_, 0);
+  cegb_host_task_penalty_.assign(num_tasks_, 0.0);
+  for (int task_index = 0; task_index < num_tasks_; ++task_index) {
+    if (!cegb_penalty_feature_coupled_.empty()) {
+      const int real_fidx = cegb_task_real_fidx_[task_index];
+      cegb_host_task_penalty_[task_index] =
+        cegb_tradeoff_ * cegb_penalty_feature_coupled_[real_fidx];
+    }
+  }
+  cuda_task_cegb_penalty_.Resize(static_cast<size_t>(num_tasks_));
+  CopyFromHostToCUDADevice<double>(cuda_task_cegb_penalty_.RawData(),
+                                   cegb_host_task_penalty_.data(),
+                                   cegb_host_task_penalty_.size(), __FILE__, __LINE__);
+}
+
+void CUDABestSplitFinder::MarkFeatureUsedInSplit(const int inner_feature_index) {
+  if (!cegb_use_ || cegb_penalty_feature_coupled_.empty()) {
+    return;
+  }
+  if (inner_feature_index < 0 ||
+      inner_feature_index >= static_cast<int>(cegb_is_feature_used_in_split_.size())) {
+    return;
+  }
+  if (cegb_is_feature_used_in_split_[inner_feature_index]) {
+    return;
+  }
+  cegb_is_feature_used_in_split_[inner_feature_index] = 1;
+  // Zero the coupled penalty for every task belonging to this feature and refresh
+  // the device copy of just those entries.
+  for (int task_index = 0; task_index < num_tasks_; ++task_index) {
+    if (split_find_tasks_[task_index].inner_feature_index == inner_feature_index) {
+      cegb_host_task_penalty_[task_index] = 0.0;
+      CopyFromHostToCUDADevice<double>(cuda_task_cegb_penalty_.RawData() + task_index,
+                                       cegb_host_task_penalty_.data() + task_index,
+                                       1, __FILE__, __LINE__);
+    }
+  }
+}
+
 void CUDABestSplitFinder::BeforeTrain(const std::vector<int8_t>& is_feature_used_bytree) {
+  // NOTE: CEGB's is_feature_used_in_split_ is intentionally NOT reset here. On the
+  // CPU path it accumulates across the whole model (cleared only once, at session
+  // init), so the coupled penalty for a feature is paid once for the entire model.
+
   CopyFromHostToCUDADevice<int8_t>(cuda_is_feature_used_bytree_.RawData(),
                                    is_feature_used_bytree.data(),
                                    is_feature_used_bytree.size(), __FILE__, __LINE__);

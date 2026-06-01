@@ -320,33 +320,90 @@ def test_cuda_l1_median_handles_small_even_and_odd_leaves(n):
 @pytest.mark.parametrize(
     "cegb_overrides",
     [
+        {"cegb_penalty_split": 0.1},
+        {"cegb_penalty_split": 1.0},
         {"cegb_penalty_split": 5.0},
         {"cegb_penalty_feature_coupled": [5.0, 5.0, 5.0, 5.0, 5.0, 5.0]},
-        {"cegb_penalty_feature_lazy": [5.0, 5.0, 5.0, 5.0, 5.0, 5.0]},
+        {"cegb_penalty_feature_coupled": [0.1, 0.1, 5.0, 5.0, 5.0, 5.0]},
         {"cegb_tradeoff": 0.5, "cegb_penalty_split": 1.0},
     ],
 )
-def test_cuda_cegb_raises(cegb_overrides):
-    """CUDA must reject cost-effective gradient boosting instead of ignoring it.
+def test_cuda_cegb_matches_cpu(cegb_overrides):
+    """CUDA must apply cost-effective gradient boosting penalties identically to CPU.
 
-    The cegb_* penalties are applied only in the CPU serial tree learner
-    (CostEfficientGradientBoosting). The CUDA learner has no equivalent, so on
-    CUDA the penalties were silently dropped. CPU must keep honoring CEGB.
+    Regression test for cegb_* being silently ignored on CUDA: the CPU serial
+    tree learner subtracts CostEfficientGradientBoosting::DeltaGain from each
+    candidate split's gain and stops splitting when the best penalized gain is
+    <= 0; the CUDA learner had no penalty plumbing and no gain>0 stop condition,
+    so CEGB had no effect on tree shape.
     """
     rng = np.random.RandomState(0)
     X = rng.rand(400, 6)
     y = 3 * X[:, 0] + 2 * X[:, 1] - X[:, 2] + 0.1 * rng.rand(400)
 
-    base = {
+    boosters = {}
+    for device_type in ("cpu", "cuda"):
+        params = {
+            "objective": "regression",
+            "num_leaves": 31,
+            "min_data_in_leaf": 1,
+            "min_gain_to_split": 0.0,
+            "learning_rate": 0.1,
+            "verbose": -1,
+            "deterministic": True,
+            "num_threads": 1,
+            "seed": 0,
+            "gpu_use_dp": True,
+            "force_col_wise": True,
+            "feature_pre_filter": False,
+            "device_type": device_type,
+            **cegb_overrides,
+        }
+        ds = lgb.Dataset(X, label=y, params={"verbose": -1, "feature_pre_filter": False})
+        boosters[device_type] = lgb.train(params, ds, num_boost_round=5)
+
+    def shape_and_features(bst):
+        leaves = [t["num_leaves"] for t in bst.dump_model()["tree_info"]]
+        used = set()
+
+        def _rec(node):
+            if "leaf_value" in node:
+                return
+            used.add(node["split_feature"])
+            _rec(node["left_child"])
+            _rec(node["right_child"])
+
+        for tree in bst.dump_model()["tree_info"]:
+            _rec(tree["tree_structure"])
+        return leaves, used
+
+    leaves_cpu, used_cpu = shape_and_features(boosters["cpu"])
+    leaves_cuda, used_cuda = shape_and_features(boosters["cuda"])
+
+    # the penalty must shape the trees identically (per-tree leaf counts + feature sets)
+    assert leaves_cpu == leaves_cuda, f"num_leaves mismatch: cpu={leaves_cpu} cuda={leaves_cuda}"
+    assert used_cpu == used_cuda
+
+    # predictions must match at FP epsilon
+    np.testing.assert_allclose(
+        boosters["cpu"].predict(X), boosters["cuda"].predict(X), rtol=0, atol=1e-10,
+        err_msg=f"cegb={cegb_overrides}: CUDA diverges from CPU",
+    )
+
+
+@_REQUIRES_CUDA
+def test_cuda_cegb_lazy_penalty_raises():
+    """cegb_penalty_feature_lazy needs per-(row, feature) cost tracking that is not
+    implemented on CUDA; it must be rejected loudly rather than silently ignored."""
+    rng = np.random.RandomState(0)
+    X = rng.rand(200, 6)
+    y = 3 * X[:, 0] + 0.1 * rng.rand(200)
+    params = {
         "objective": "regression",
-        "num_leaves": 31,
-        "min_data_in_leaf": 1,
-        "min_gain_to_split": 0.0,
+        "device_type": "cuda",
+        "cegb_penalty_feature_lazy": [5.0] * 6,
+        "num_leaves": 15,
         "verbose": -1,
-        **cegb_overrides,
     }
-
-    lgb.train(dict(base, device_type="cpu"), lgb.Dataset(X, label=y, params={"verbose": -1}), num_boost_round=1)
-
-    with pytest.raises(lgb.basic.LightGBMError, match="cost-effective"):
-        lgb.train(dict(base, device_type="cuda"), lgb.Dataset(X, label=y, params={"verbose": -1}), num_boost_round=1)
+    with pytest.raises(lgb.basic.LightGBMError, match="cegb_penalty_feature_lazy"):
+        lgb.train(params, lgb.Dataset(X, label=y, params={"verbose": -1}), num_boost_round=1)

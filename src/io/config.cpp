@@ -421,16 +421,9 @@ void Config::CheckParamConflict(const std::unordered_map<std::string, std::strin
     if (deterministic) {
       Log::Warning("Although \"deterministic\" is set, the results ran by GPU may be non-deterministic.");
     }
-    // CEGB (cost-effective gradient boosting) is implemented only in the CPU
-    // serial tree learner. Mirror CostEfficientGradientBoosting::IsEnable here so
-    // users are not silently handed a model that ignores the cegb_* penalties.
-    const bool cegb_enabled = !(cegb_tradeoff >= 1.0f && cegb_penalty_split <= 0.0f &&
-                                cegb_penalty_feature_coupled.empty() &&
-                                cegb_penalty_feature_lazy.empty());
-    if (cegb_enabled) {
-      Log::Fatal("CUDA tree learner does not support cost-effective gradient boosting "
-                 "(cegb_tradeoff, cegb_penalty_split, cegb_penalty_feature_coupled, "
-                 "cegb_penalty_feature_lazy). Run with device_type=cpu to use CEGB.");
+    if (!cegb_penalty_feature_lazy.empty()) {
+      Log::Fatal("cegb_penalty_feature_lazy is not supported with device_type=\"cuda\". "
+                 "Use device_type=\"cpu\", or use cegb_penalty_feature_coupled / cegb_penalty_split instead.");
     }
   }
   // linear tree learner must be serial type and run on CPU device
