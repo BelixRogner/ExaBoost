@@ -41,14 +41,14 @@ class CUDALeafSplits: public NCCLInfo {
   void Init(const bool use_quantized_grad);
 
   void InitValues(
-    const double lambda_l1, const double lambda_l2,
+    const double lambda_l1, const double lambda_l2, const double max_delta_step,
     const score_t* cuda_gradients, const score_t* cuda_hessians,
     const data_size_t* cuda_bagging_data_indices,
     const data_size_t* cuda_data_indices_in_leaf, const data_size_t num_used_indices,
     hist_t* cuda_hist_in_leaf, double* root_sum_gradients, double* root_sum_hessians);
 
   void InitValues(
-    const double lambda_l1, const double lambda_l2,
+    const double lambda_l1, const double lambda_l2, const double max_delta_step,
     const int16_t* cuda_gradients_and_hessians,
     const data_size_t* cuda_bagging_data_indices,
     const data_size_t* cuda_data_indices_in_leaf, const data_size_t num_used_indices,
@@ -75,13 +75,18 @@ class CUDALeafSplits: public NCCLInfo {
   template <bool USE_L1, bool USE_SMOOTHING>
   __device__ static double CalculateSplittedLeafOutput(double sum_gradients,
                                           double sum_hessians, double l1, double l2,
-                                          double path_smooth, data_size_t num_data,
+                                          double path_smooth, double max_delta_step,
+                                          data_size_t num_data,
                                           double parent_output) {
     double ret;
     if (USE_L1) {
       ret = -ThresholdL1(sum_gradients, l1) / (sum_hessians + l2);
     } else {
       ret = -sum_gradients / (sum_hessians + l2);
+    }
+    // mirrors the USE_MAX_OUTPUT branch of the CPU FeatureHistogram::CalculateSplittedLeafOutput
+    if (max_delta_step > 0.0 && fabs(ret) > max_delta_step) {
+      ret = (ret >= 0.0 ? max_delta_step : -max_delta_step);
     }
     if (USE_SMOOTHING) {
       ret = ret * (num_data / path_smooth) / (num_data / path_smooth + 1) \
@@ -106,9 +111,10 @@ class CUDALeafSplits: public NCCLInfo {
   template <bool USE_L1, bool USE_SMOOTHING>
   __device__ static double GetLeafGain(double sum_gradients, double sum_hessians,
                           double l1, double l2,
-                          double path_smooth, data_size_t num_data,
+                          double path_smooth, double max_delta_step,
+                          data_size_t num_data,
                           double parent_output) {
-    if (!USE_SMOOTHING) {
+    if (!USE_SMOOTHING && max_delta_step <= 0.0) {
       if (USE_L1) {
         const double sg_l1 = ThresholdL1(sum_gradients, l1);
         return (sg_l1 * sg_l1) / (sum_hessians + l2);
@@ -117,7 +123,7 @@ class CUDALeafSplits: public NCCLInfo {
       }
     } else {
       const double output = CalculateSplittedLeafOutput<USE_L1, USE_SMOOTHING>(
-          sum_gradients, sum_hessians, l1, l2, path_smooth, num_data, parent_output);
+          sum_gradients, sum_hessians, l1, l2, path_smooth, max_delta_step, num_data, parent_output);
       return GetLeafGainGivenOutput<USE_L1>(sum_gradients, sum_hessians, l1, l2, output);
     }
   }
@@ -129,29 +135,30 @@ class CUDALeafSplits: public NCCLInfo {
                             double sum_right_hessians,
                             double l1, double l2,
                             double path_smooth,
+                            double max_delta_step,
                             data_size_t left_count,
                             data_size_t right_count,
                             double parent_output) {
     return GetLeafGain<USE_L1, USE_SMOOTHING>(sum_left_gradients,
                       sum_left_hessians,
-                      l1, l2, path_smooth, left_count, parent_output) +
+                      l1, l2, path_smooth, max_delta_step, left_count, parent_output) +
           GetLeafGain<USE_L1, USE_SMOOTHING>(sum_right_gradients,
                       sum_right_hessians,
-                      l1, l2, path_smooth, right_count, parent_output);
+                      l1, l2, path_smooth, max_delta_step, right_count, parent_output);
   }
 
  private:
   void LaunchInitValuesEmptyKernel();
 
   void LaunchInitValuesKernel(
-    const double lambda_l1, const double lambda_l2,
+    const double lambda_l1, const double lambda_l2, const double max_delta_step,
     const data_size_t* cuda_bagging_data_indices,
     const data_size_t* cuda_data_indices_in_leaf,
     const data_size_t num_used_indices,
     hist_t* cuda_hist_in_leaf);
 
   void LaunchInitValuesKernel(
-    const double lambda_l1, const double lambda_l2,
+    const double lambda_l1, const double lambda_l2, const double max_delta_step,
     const data_size_t* cuda_bagging_data_indices,
     const data_size_t* cuda_data_indices_in_leaf,
     const data_size_t num_used_indices,

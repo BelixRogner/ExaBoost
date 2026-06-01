@@ -37,6 +37,7 @@ CUDABestSplitFinder::CUDABestSplitFinder(
   extra_seed_(config->extra_seed),
   use_smoothing_(config->path_smooth > 0),
   path_smooth_(config->path_smooth),
+  max_delta_step_(config->max_delta_step),
   num_total_bin_(feature_hist_offsets.empty() ? 0 : static_cast<int>(feature_hist_offsets.back())),
   select_features_by_node_(select_features_by_node),
   cuda_hist_(cuda_hist) {
@@ -278,6 +279,7 @@ void CUDABestSplitFinder::ResetConfig(const Config* config, const hist_t* cuda_h
   extra_seed_ = config->extra_seed;
   use_smoothing_ = (config->path_smooth > 0.0f);
   path_smooth_ = config->path_smooth;
+  max_delta_step_ = config->max_delta_step;
   cuda_hist_ = cuda_hist;
 
   const int num_task_blocks = (num_tasks_ + NUM_TASKS_PER_SYNC_BLOCK - 1) / NUM_TASKS_PER_SYNC_BLOCK;

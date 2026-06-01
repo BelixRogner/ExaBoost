@@ -137,6 +137,7 @@ __device__ void FindBestSplitsForLeafKernelInner(
   const double lambda_l1,
   const double lambda_l2,
   const double path_smooth,
+  const double max_delta_step,
   const data_size_t min_data_in_leaf,
   const double min_sum_hessian_in_leaf,
   const double min_gain_to_split,
@@ -227,7 +228,7 @@ __device__ void FindBestSplitsForLeafKernelInner(
         double current_gain = CUDALeafSplits::GetSplitGains<USE_L1, USE_SMOOTHING>(
           sum_left_gradient, sum_left_hessian, sum_right_gradient,
           sum_right_hessian, lambda_l1,
-          lambda_l2, path_smooth, left_count, right_count, parent_output);
+          lambda_l2, path_smooth, max_delta_step, left_count, right_count, parent_output);
         // gain with split is worse than without split
         if (current_gain > min_gain_shift) {
           local_gain = current_gain - min_gain_shift;
@@ -251,7 +252,7 @@ __device__ void FindBestSplitsForLeafKernelInner(
         double current_gain = CUDALeafSplits::GetSplitGains<USE_L1, USE_SMOOTHING>(
           sum_left_gradient, sum_left_hessian, sum_right_gradient,
           sum_right_hessian, lambda_l1,
-          lambda_l2, path_smooth, left_count, right_count, parent_output);
+          lambda_l2, path_smooth, max_delta_step, left_count, right_count, parent_output);
         // gain with split is worse than without split
         if (current_gain > min_gain_shift) {
           local_gain = current_gain - min_gain_shift;
@@ -282,9 +283,9 @@ __device__ void FindBestSplitsForLeafKernelInner(
       const double sum_left_hessian = sum_hessians - sum_right_hessian - kEpsilon;
       const data_size_t left_count = num_data - right_count;
       const double left_output = CUDALeafSplits::CalculateSplittedLeafOutput<USE_L1, USE_SMOOTHING>(sum_left_gradient,
-        sum_left_hessian, lambda_l1, lambda_l2, path_smooth, left_count, parent_output);
+        sum_left_hessian, lambda_l1, lambda_l2, path_smooth, max_delta_step, left_count, parent_output);
       const double right_output = CUDALeafSplits::CalculateSplittedLeafOutput<USE_L1, USE_SMOOTHING>(sum_right_gradient,
-        sum_right_hessian, lambda_l1, lambda_l2, path_smooth, right_count, parent_output);
+        sum_right_hessian, lambda_l1, lambda_l2, path_smooth, max_delta_step, right_count, parent_output);
       cuda_best_split_info->left_sum_gradients = sum_left_gradient;
       cuda_best_split_info->left_sum_hessians = sum_left_hessian;
       cuda_best_split_info->left_count = left_count;
@@ -305,9 +306,9 @@ __device__ void FindBestSplitsForLeafKernelInner(
       const double sum_right_hessian = sum_hessians - sum_left_hessian - kEpsilon;
       const data_size_t right_count = num_data - left_count;
       const double left_output = CUDALeafSplits::CalculateSplittedLeafOutput<USE_L1, USE_SMOOTHING>(sum_left_gradient,
-        sum_left_hessian, lambda_l1, lambda_l2, path_smooth, left_count, parent_output);
+        sum_left_hessian, lambda_l1, lambda_l2, path_smooth, max_delta_step, left_count, parent_output);
       const double right_output = CUDALeafSplits::CalculateSplittedLeafOutput<USE_L1, USE_SMOOTHING>(sum_right_gradient,
-        sum_right_hessian, lambda_l1, lambda_l2, path_smooth, right_count, parent_output);
+        sum_right_hessian, lambda_l1, lambda_l2, path_smooth, max_delta_step, right_count, parent_output);
       cuda_best_split_info->left_sum_gradients = sum_left_gradient;
       cuda_best_split_info->left_sum_hessians = sum_left_hessian;
       cuda_best_split_info->left_count = left_count;
@@ -335,6 +336,7 @@ __device__ void FindBestSplitsDiscretizedForLeafKernelInner(
   const double lambda_l1,
   const double lambda_l2,
   const double path_smooth,
+  const double max_delta_step,
   const data_size_t min_data_in_leaf,
   const double min_sum_hessian_in_leaf,
   const double min_gain_to_split,
@@ -424,7 +426,7 @@ __device__ void FindBestSplitsDiscretizedForLeafKernelInner(
         double current_gain = CUDALeafSplits::GetSplitGains<USE_L1, USE_SMOOTHING>(
           sum_left_gradient, sum_left_hessian + kEpsilon, sum_right_gradient,
           sum_right_hessian + kEpsilon, lambda_l1,
-          lambda_l2, path_smooth, left_count, right_count, parent_output);
+          lambda_l2, path_smooth, max_delta_step, left_count, right_count, parent_output);
         // gain with split is worse than without split
         if (current_gain > min_gain_shift) {
           local_gain = current_gain - min_gain_shift;
@@ -451,7 +453,7 @@ __device__ void FindBestSplitsDiscretizedForLeafKernelInner(
         double current_gain = CUDALeafSplits::GetSplitGains<USE_L1, USE_SMOOTHING>(
           sum_left_gradient, sum_left_hessian + kEpsilon, sum_right_gradient,
           sum_right_hessian + kEpsilon, lambda_l1,
-          lambda_l2, path_smooth, left_count, right_count, parent_output);
+          lambda_l2, path_smooth, max_delta_step, left_count, right_count, parent_output);
         // gain with split is worse than without split
         if (current_gain > min_gain_shift) {
           local_gain = current_gain - min_gain_shift;
@@ -473,9 +475,9 @@ __device__ void FindBestSplitsDiscretizedForLeafKernelInner(
     cuda_best_split_info->gain = local_gain;
     cuda_best_split_info->default_left = task->assume_out_default_left;
     const double left_output = CUDALeafSplits::CalculateSplittedLeafOutput<USE_L1, USE_SMOOTHING>(sum_left_gradient,
-      sum_left_hessian, lambda_l1, lambda_l2, path_smooth, left_count, parent_output);
+      sum_left_hessian, lambda_l1, lambda_l2, path_smooth, max_delta_step, left_count, parent_output);
     const double right_output = CUDALeafSplits::CalculateSplittedLeafOutput<USE_L1, USE_SMOOTHING>(sum_right_gradient,
-      sum_right_hessian, lambda_l1, lambda_l2, path_smooth, right_count, parent_output);
+      sum_right_hessian, lambda_l1, lambda_l2, path_smooth, max_delta_step, right_count, parent_output);
     cuda_best_split_info->left_sum_gradients = sum_left_gradient;
     cuda_best_split_info->left_sum_hessians = sum_left_hessian;
     cuda_best_split_info->left_sum_of_gradients_hessians = sum_left_gradient_hessian;
@@ -504,6 +506,7 @@ __device__ void FindBestSplitsForLeafKernelCategoricalInner(
   const double lambda_l1,
   const double lambda_l2,
   const double path_smooth,
+  const double max_delta_step,
   const data_size_t min_data_in_leaf,
   const double min_sum_hessian_in_leaf,
   const double min_gain_to_split,
@@ -561,7 +564,7 @@ __device__ void FindBestSplitsForLeafKernelCategoricalInner(
             double current_gain = CUDALeafSplits::GetSplitGains<USE_L1, USE_SMOOTHING>(
               sum_other_gradient, sum_other_hessian, grad,
               hess + kEpsilon, lambda_l1,
-              l2, path_smooth, other_count, cnt, parent_output);
+              l2, path_smooth, max_delta_step, other_count, cnt, parent_output);
             if (current_gain > min_gain_shift) {
               local_gain = current_gain;
               threshold_found = true;
@@ -590,9 +593,9 @@ __device__ void FindBestSplitsForLeafKernelCategoricalInner(
       const double sum_right_hessian = sum_hessians - sum_left_hessian;
       const data_size_t right_count = static_cast<data_size_t>(__double2int_rn(sum_right_hessian * cnt_factor));
       const double left_output = CUDALeafSplits::CalculateSplittedLeafOutput<USE_L1, USE_SMOOTHING>(sum_left_gradient,
-        sum_left_hessian, lambda_l1, l2, path_smooth, left_count, parent_output);
+        sum_left_hessian, lambda_l1, l2, path_smooth, max_delta_step, left_count, parent_output);
       const double right_output = CUDALeafSplits::CalculateSplittedLeafOutput<USE_L1, USE_SMOOTHING>(sum_right_gradient,
-        sum_right_hessian, lambda_l1, l2, path_smooth, right_count, parent_output);
+        sum_right_hessian, lambda_l1, l2, path_smooth, max_delta_step, right_count, parent_output);
       cuda_best_split_info->left_sum_gradients = sum_left_gradient;
       cuda_best_split_info->left_sum_hessians = sum_left_hessian;
       cuda_best_split_info->left_count = left_count;
@@ -676,7 +679,7 @@ __device__ void FindBestSplitsForLeafKernelCategoricalInner(
         double current_gain = CUDALeafSplits::GetSplitGains<USE_L1, USE_SMOOTHING>(
           sum_left_gradient, sum_left_hessian, sum_right_gradient,
           sum_right_hessian, lambda_l1,
-          l2, path_smooth, left_count, right_count, parent_output);
+          l2, path_smooth, max_delta_step, left_count, right_count, parent_output);
         // gain with split is worse than without split
         if (current_gain > local_gain) {
           local_gain = current_gain;
@@ -716,7 +719,7 @@ __device__ void FindBestSplitsForLeafKernelCategoricalInner(
         double current_gain = CUDALeafSplits::GetSplitGains<USE_L1, USE_SMOOTHING>(
           sum_left_gradient, sum_left_hessian, sum_right_gradient,
           sum_right_hessian, lambda_l1,
-          l2, path_smooth, left_count, right_count, parent_output);
+          l2, path_smooth, max_delta_step, left_count, right_count, parent_output);
         // gain with split is worse than without split
         if (current_gain > local_gain) {
           local_gain = current_gain;
@@ -755,9 +758,9 @@ __device__ void FindBestSplitsForLeafKernelCategoricalInner(
       const double sum_right_hessian = sum_hessians - sum_left_hessian;
       const data_size_t right_count = static_cast<data_size_t>(__double2int_rn(sum_right_hessian * cnt_factor));
       const double left_output = CUDALeafSplits::CalculateSplittedLeafOutput<USE_L1, USE_SMOOTHING>(sum_left_gradient,
-        sum_left_hessian, lambda_l1, l2, path_smooth, left_count, parent_output);
+        sum_left_hessian, lambda_l1, l2, path_smooth, max_delta_step, left_count, parent_output);
       const double right_output = CUDALeafSplits::CalculateSplittedLeafOutput<USE_L1, USE_SMOOTHING>(sum_right_gradient,
-        sum_right_hessian, lambda_l1, l2, path_smooth, right_count, parent_output);
+        sum_right_hessian, lambda_l1, l2, path_smooth, max_delta_step, right_count, parent_output);
       cuda_best_split_info->left_sum_gradients = sum_left_gradient;
       cuda_best_split_info->left_sum_hessians = sum_left_hessian;
       cuda_best_split_info->left_count = left_count;
@@ -792,6 +795,7 @@ __global__ void FindBestSplitsForLeafKernel(
   const double lambda_l1,
   const double lambda_l2,
   const double path_smooth,
+  const double max_delta_step,
   const double cat_smooth,
   const double cat_l2,
   const int max_cat_threshold,
@@ -826,6 +830,7 @@ __global__ void FindBestSplitsForLeafKernel(
         lambda_l1,
         lambda_l2,
         path_smooth,
+        max_delta_step,
         min_data_in_leaf,
         min_sum_hessian_in_leaf,
         min_gain_to_split,
@@ -853,6 +858,7 @@ __global__ void FindBestSplitsForLeafKernel(
           lambda_l1,
           lambda_l2,
           path_smooth,
+          max_delta_step,
           min_data_in_leaf,
           min_sum_hessian_in_leaf,
           min_gain_to_split,
@@ -875,6 +881,7 @@ __global__ void FindBestSplitsForLeafKernel(
           lambda_l1,
           lambda_l2,
           path_smooth,
+          max_delta_step,
           min_data_in_leaf,
           min_sum_hessian_in_leaf,
           min_gain_to_split,
@@ -914,6 +921,7 @@ __global__ void FindBestSplitsDiscretizedForLeafKernel(
   const double lambda_l1,
   const double lambda_l2,
   const double path_smooth,
+  const double max_delta_step,
   const double cat_smooth,
   const double cat_l2,
   const int max_cat_threshold,
@@ -962,6 +970,7 @@ __global__ void FindBestSplitsDiscretizedForLeafKernel(
             lambda_l1,
             lambda_l2,
             path_smooth,
+            max_delta_step,
             min_data_in_leaf,
             min_sum_hessian_in_leaf,
             min_gain_to_split,
@@ -988,6 +997,7 @@ __global__ void FindBestSplitsDiscretizedForLeafKernel(
             lambda_l1,
             lambda_l2,
             path_smooth,
+            max_delta_step,
             min_data_in_leaf,
             min_sum_hessian_in_leaf,
             min_gain_to_split,
@@ -1016,6 +1026,7 @@ __global__ void FindBestSplitsDiscretizedForLeafKernel(
             lambda_l1,
             lambda_l2,
             path_smooth,
+            max_delta_step,
             min_data_in_leaf,
             min_sum_hessian_in_leaf,
             min_gain_to_split,
@@ -1042,6 +1053,7 @@ __global__ void FindBestSplitsDiscretizedForLeafKernel(
             lambda_l1,
             lambda_l2,
             path_smooth,
+            max_delta_step,
             min_data_in_leaf,
             min_sum_hessian_in_leaf,
             min_gain_to_split,
@@ -1074,6 +1086,7 @@ __device__ void FindBestSplitsForLeafKernelInner_GlobalMemory(
   const double lambda_l1,
   const double lambda_l2,
   const double path_smooth,
+  const double max_delta_step,
   const data_size_t min_data_in_leaf,
   const double min_sum_hessian_in_leaf,
   const double min_gain_to_split,
@@ -1182,7 +1195,7 @@ __device__ void FindBestSplitsForLeafKernelInner_GlobalMemory(
           double current_gain = CUDALeafSplits::GetSplitGains<USE_L1, USE_SMOOTHING>(
             sum_left_gradient, sum_left_hessian, sum_right_gradient,
             sum_right_hessian, lambda_l1,
-            lambda_l2, path_smooth, left_count, right_count, parent_output);
+            lambda_l2, path_smooth, max_delta_step, left_count, right_count, parent_output);
           // gain with split is worse than without split
           if (current_gain > min_gain_shift) {
             local_gain = current_gain - min_gain_shift;
@@ -1210,7 +1223,7 @@ __device__ void FindBestSplitsForLeafKernelInner_GlobalMemory(
           double current_gain = CUDALeafSplits::GetSplitGains<USE_L1, USE_SMOOTHING>(
             sum_left_gradient, sum_left_hessian, sum_right_gradient,
             sum_right_hessian, lambda_l1,
-            lambda_l2, path_smooth, left_count, right_count, parent_output);
+            lambda_l2, path_smooth, max_delta_step, left_count, right_count, parent_output);
           // gain with split is worse than without split
           if (current_gain > min_gain_shift) {
             local_gain = current_gain - min_gain_shift;
@@ -1242,9 +1255,9 @@ __device__ void FindBestSplitsForLeafKernelInner_GlobalMemory(
       const double sum_left_hessian = sum_hessians - sum_right_hessian - kEpsilon;
       const data_size_t left_count = num_data - right_count;
       const double left_output = CUDALeafSplits::CalculateSplittedLeafOutput<USE_L1, USE_SMOOTHING>(sum_left_gradient,
-        sum_left_hessian, lambda_l1, lambda_l2, path_smooth, left_count, parent_output);
+        sum_left_hessian, lambda_l1, lambda_l2, path_smooth, max_delta_step, left_count, parent_output);
       const double right_output = CUDALeafSplits::CalculateSplittedLeafOutput<USE_L1, USE_SMOOTHING>(sum_right_gradient,
-        sum_right_hessian, lambda_l1, lambda_l2, path_smooth, right_count, parent_output);
+        sum_right_hessian, lambda_l1, lambda_l2, path_smooth, max_delta_step, right_count, parent_output);
       cuda_best_split_info->left_sum_gradients = sum_left_gradient;
       cuda_best_split_info->left_sum_hessians = sum_left_hessian;
       cuda_best_split_info->left_count = left_count;
@@ -1267,9 +1280,9 @@ __device__ void FindBestSplitsForLeafKernelInner_GlobalMemory(
       const double sum_right_hessian = sum_hessians - sum_left_hessian - kEpsilon;
       const data_size_t right_count = num_data - left_count;
       const double left_output = CUDALeafSplits::CalculateSplittedLeafOutput<USE_L1, USE_SMOOTHING>(sum_left_gradient,
-        sum_left_hessian, lambda_l1, lambda_l2, path_smooth, left_count, parent_output);
+        sum_left_hessian, lambda_l1, lambda_l2, path_smooth, max_delta_step, left_count, parent_output);
       const double right_output = CUDALeafSplits::CalculateSplittedLeafOutput<USE_L1, USE_SMOOTHING>(sum_right_gradient,
-        sum_right_hessian, lambda_l1, lambda_l2, path_smooth, right_count, parent_output);
+        sum_right_hessian, lambda_l1, lambda_l2, path_smooth, max_delta_step, right_count, parent_output);
       cuda_best_split_info->left_sum_gradients = sum_left_gradient;
       cuda_best_split_info->left_sum_hessians = sum_left_hessian;
       cuda_best_split_info->left_count = left_count;
@@ -1297,6 +1310,7 @@ __device__ void FindBestSplitsForLeafKernelCategoricalInner_GlobalMemory(
   const double lambda_l1,
   const double lambda_l2,
   const double path_smooth,
+  const double max_delta_step,
   const data_size_t min_data_in_leaf,
   const double min_sum_hessian_in_leaf,
   const double min_gain_to_split,
@@ -1359,7 +1373,7 @@ __device__ void FindBestSplitsForLeafKernelCategoricalInner_GlobalMemory(
             double current_gain = CUDALeafSplits::GetSplitGains<USE_L1, USE_SMOOTHING>(
               sum_other_gradient, sum_other_hessian, grad,
               hess + kEpsilon, lambda_l1,
-              l2, path_smooth, other_count, cnt, parent_output);
+              l2, path_smooth, max_delta_step, other_count, cnt, parent_output);
             if (current_gain > min_gain_shift) {
               best_threshold = bin;
               local_gain = current_gain - min_gain_shift;
@@ -1389,9 +1403,9 @@ __device__ void FindBestSplitsForLeafKernelCategoricalInner_GlobalMemory(
       const double sum_right_hessian = sum_hessians - sum_left_hessian;
       const data_size_t right_count = static_cast<data_size_t>(__double2int_rn(sum_right_hessian * cnt_factor));
       const double left_output = CUDALeafSplits::CalculateSplittedLeafOutput<USE_L1, USE_SMOOTHING>(sum_left_gradient,
-        sum_left_hessian, lambda_l1, l2, path_smooth, left_count, parent_output);
+        sum_left_hessian, lambda_l1, l2, path_smooth, max_delta_step, left_count, parent_output);
       const double right_output = CUDALeafSplits::CalculateSplittedLeafOutput<USE_L1, USE_SMOOTHING>(sum_right_gradient,
-        sum_right_hessian, lambda_l1, l2, path_smooth, right_count, parent_output);
+        sum_right_hessian, lambda_l1, l2, path_smooth, max_delta_step, right_count, parent_output);
       cuda_best_split_info->left_sum_gradients = sum_left_gradient;
       cuda_best_split_info->left_sum_hessians = sum_left_hessian;
       cuda_best_split_info->left_count = left_count;
@@ -1472,7 +1486,7 @@ __device__ void FindBestSplitsForLeafKernelCategoricalInner_GlobalMemory(
         double current_gain = CUDALeafSplits::GetSplitGains<USE_L1, USE_SMOOTHING>(
           sum_left_gradient, sum_left_hessian, sum_right_gradient,
           sum_right_hessian, lambda_l1,
-          l2, path_smooth, left_count, right_count, parent_output);
+          l2, path_smooth, max_delta_step, left_count, right_count, parent_output);
         // gain with split is worse than without split
         if (current_gain > min_gain_shift) {
           local_gain = current_gain - min_gain_shift;
@@ -1512,7 +1526,7 @@ __device__ void FindBestSplitsForLeafKernelCategoricalInner_GlobalMemory(
         double current_gain = CUDALeafSplits::GetSplitGains<USE_L1, USE_SMOOTHING>(
           sum_left_gradient, sum_left_hessian, sum_right_gradient,
           sum_right_hessian, lambda_l1,
-          l2, path_smooth, left_count, right_count, parent_output);
+          l2, path_smooth, max_delta_step, left_count, right_count, parent_output);
         // gain with split is worse than without split
         if (current_gain > min_gain_shift) {
           local_gain = current_gain - min_gain_shift;
@@ -1553,9 +1567,9 @@ __device__ void FindBestSplitsForLeafKernelCategoricalInner_GlobalMemory(
       const double sum_right_hessian = sum_hessians - sum_left_hessian;
       const data_size_t right_count = static_cast<data_size_t>(__double2int_rn(sum_right_hessian * cnt_factor));
       const double left_output = CUDALeafSplits::CalculateSplittedLeafOutput<USE_L1, USE_SMOOTHING>(sum_left_gradient,
-        sum_left_hessian, lambda_l1, l2, path_smooth, left_count, parent_output);
+        sum_left_hessian, lambda_l1, l2, path_smooth, max_delta_step, left_count, parent_output);
       const double right_output = CUDALeafSplits::CalculateSplittedLeafOutput<USE_L1, USE_SMOOTHING>(sum_right_gradient,
-        sum_right_hessian, lambda_l1, l2, path_smooth, right_count, parent_output);
+        sum_right_hessian, lambda_l1, l2, path_smooth, max_delta_step, right_count, parent_output);
       cuda_best_split_info->left_sum_gradients = sum_left_gradient;
       cuda_best_split_info->left_sum_hessians = sum_left_hessian;
       cuda_best_split_info->left_count = left_count;
@@ -1590,6 +1604,7 @@ __global__ void FindBestSplitsForLeafKernel_GlobalMemory(
   const double lambda_l1,
   const double lambda_l2,
   const double path_smooth,
+  const double max_delta_step,
   const double cat_smooth,
   const double cat_l2,
   const int max_cat_threshold,
@@ -1633,6 +1648,7 @@ __global__ void FindBestSplitsForLeafKernel_GlobalMemory(
         lambda_l1,
         lambda_l2,
         path_smooth,
+        max_delta_step,
         min_data_in_leaf,
         min_sum_hessian_in_leaf,
         min_gain_to_split,
@@ -1665,6 +1681,7 @@ __global__ void FindBestSplitsForLeafKernel_GlobalMemory(
           lambda_l1,
           lambda_l2,
           path_smooth,
+          max_delta_step,
           min_data_in_leaf,
           min_sum_hessian_in_leaf,
           min_gain_to_split,
@@ -1690,6 +1707,7 @@ __global__ void FindBestSplitsForLeafKernel_GlobalMemory(
           lambda_l1,
           lambda_l2,
           path_smooth,
+          max_delta_step,
           min_data_in_leaf,
           min_sum_hessian_in_leaf,
           min_gain_to_split,
@@ -1743,6 +1761,7 @@ __global__ void FindBestSplitsForLeafKernel_GlobalMemory(
     lambda_l1_, \
     lambda_l2_, \
     path_smooth_, \
+    max_delta_step_, \
     cat_smooth_, \
     cat_l2_, \
     max_cat_threshold_, \
@@ -1869,6 +1888,7 @@ void CUDABestSplitFinder::LaunchFindBestSplitsForLeafKernelInner2(LaunchFindBest
     lambda_l1_, \
     lambda_l2_, \
     path_smooth_, \
+    max_delta_step_, \
     cat_smooth_, \
     cat_l2_, \
     max_cat_threshold_, \

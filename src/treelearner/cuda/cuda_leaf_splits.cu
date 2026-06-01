@@ -39,6 +39,7 @@ __global__ void CUDAInitValuesKernel1(const score_t* cuda_gradients, const score
 __global__ void CUDAInitValuesKernel2(
   const double lambda_l1,
   const double lambda_l2,
+  const double max_delta_step,
   const int num_blocks_to_reduce,
   double* cuda_sum_of_gradients,
   double* cuda_sum_of_hessians,
@@ -65,19 +66,19 @@ __global__ void CUDAInitValuesKernel2(
     const bool use_l1 = lambda_l1 > 0.0f;
     if (!use_l1) {
       // no smoothing on root node
-      cuda_struct->gain = CUDALeafSplits::GetLeafGain<false, false>(sum_of_gradients, sum_of_hessians, lambda_l1, lambda_l2, 0.0f, 0, 0.0f);
+      cuda_struct->gain = CUDALeafSplits::GetLeafGain<false, false>(sum_of_gradients, sum_of_hessians, lambda_l1, lambda_l2, 0.0f, max_delta_step, 0, 0.0f);
     } else {
       // no smoothing on root node
-      cuda_struct->gain = CUDALeafSplits::GetLeafGain<true, false>(sum_of_gradients, sum_of_hessians, lambda_l1, lambda_l2, 0.0f, 0, 0.0f);
+      cuda_struct->gain = CUDALeafSplits::GetLeafGain<true, false>(sum_of_gradients, sum_of_hessians, lambda_l1, lambda_l2, 0.0f, max_delta_step, 0, 0.0f);
     }
     if (!use_l1) {
       // no smoothing on root node
       cuda_struct->leaf_value =
-        CUDALeafSplits::CalculateSplittedLeafOutput<false, false>(sum_of_gradients, sum_of_hessians, lambda_l1, lambda_l2, 0.0f, 0, 0.0f);
+        CUDALeafSplits::CalculateSplittedLeafOutput<false, false>(sum_of_gradients, sum_of_hessians, lambda_l1, lambda_l2, 0.0f, max_delta_step, 0, 0.0f);
     } else {
       // no smoothing on root node
       cuda_struct->leaf_value =
-        CUDALeafSplits::CalculateSplittedLeafOutput<true, false>(sum_of_gradients, sum_of_hessians, lambda_l1, lambda_l2, 0.0f, 0, 0.0f);
+        CUDALeafSplits::CalculateSplittedLeafOutput<true, false>(sum_of_gradients, sum_of_hessians, lambda_l1, lambda_l2, 0.0f, max_delta_step, 0, 0.0f);
     }
     cuda_struct->data_indices_in_leaf = cuda_data_indices_in_leaf;
     cuda_struct->hist_in_leaf = cuda_hist_in_leaf;
@@ -114,6 +115,7 @@ __global__ void CUDAInitValuesKernel3(const int16_t* cuda_gradients_and_hessians
 __global__ void CUDAInitValuesKernel4(
   const double lambda_l1,
   const double lambda_l2,
+  const double max_delta_step,
   const int num_blocks_to_reduce,
   double* cuda_sum_of_gradients,
   double* cuda_sum_of_hessians,
@@ -149,19 +151,19 @@ __global__ void CUDAInitValuesKernel4(
     const bool use_l1 = lambda_l1 > 0.0f;
     if (!use_l1) {
       // no smoothing on root node
-      cuda_struct->gain = CUDALeafSplits::GetLeafGain<false, false>(sum_of_gradients, sum_of_hessians, lambda_l1, lambda_l2, 0.0f, 0, 0.0f);
+      cuda_struct->gain = CUDALeafSplits::GetLeafGain<false, false>(sum_of_gradients, sum_of_hessians, lambda_l1, lambda_l2, 0.0f, max_delta_step, 0, 0.0f);
     } else {
       // no smoothing on root node
-      cuda_struct->gain = CUDALeafSplits::GetLeafGain<true, false>(sum_of_gradients, sum_of_hessians, lambda_l1, lambda_l2, 0.0f, 0, 0.0f);
+      cuda_struct->gain = CUDALeafSplits::GetLeafGain<true, false>(sum_of_gradients, sum_of_hessians, lambda_l1, lambda_l2, 0.0f, max_delta_step, 0, 0.0f);
     }
     if (!use_l1) {
       // no smoothing on root node
       cuda_struct->leaf_value =
-        CUDALeafSplits::CalculateSplittedLeafOutput<false, false>(sum_of_gradients, sum_of_hessians, lambda_l1, lambda_l2, 0.0f, 0, 0.0f);
+        CUDALeafSplits::CalculateSplittedLeafOutput<false, false>(sum_of_gradients, sum_of_hessians, lambda_l1, lambda_l2, 0.0f, max_delta_step, 0, 0.0f);
     } else {
       // no smoothing on root node
       cuda_struct->leaf_value =
-        CUDALeafSplits::CalculateSplittedLeafOutput<true, false>(sum_of_gradients, sum_of_hessians, lambda_l1, lambda_l2, 0.0f, 0, 0.0f);
+        CUDALeafSplits::CalculateSplittedLeafOutput<true, false>(sum_of_gradients, sum_of_hessians, lambda_l1, lambda_l2, 0.0f, max_delta_step, 0, 0.0f);
     }
     cuda_struct->data_indices_in_leaf = cuda_data_indices_in_leaf;
     cuda_struct->hist_in_leaf = cuda_hist_in_leaf;
@@ -233,6 +235,7 @@ __global__ void ReduceGradKernel(
 __global__ void CUDAInitSetValuesKernel(
   const double lambda_l1,
   const double lambda_l2,
+  const double max_delta_step,
   double* cuda_sum_of_gradients,
   double* cuda_sum_of_hessians,
   const data_size_t num_data,
@@ -249,19 +252,19 @@ __global__ void CUDAInitSetValuesKernel(
     const bool use_l1 = lambda_l1 > 0.0f;
     if (!use_l1) {
       // no smoothing on root node
-      cuda_struct->gain = CUDALeafSplits::GetLeafGain<false, false>(sum_of_gradients, sum_of_hessians, lambda_l1, lambda_l2, 0.0f, 0, 0.0f);
+      cuda_struct->gain = CUDALeafSplits::GetLeafGain<false, false>(sum_of_gradients, sum_of_hessians, lambda_l1, lambda_l2, 0.0f, max_delta_step, 0, 0.0f);
     } else {
       // no smoothing on root node
-      cuda_struct->gain = CUDALeafSplits::GetLeafGain<true, false>(sum_of_gradients, sum_of_hessians, lambda_l1, lambda_l2, 0.0f, 0, 0.0f);
+      cuda_struct->gain = CUDALeafSplits::GetLeafGain<true, false>(sum_of_gradients, sum_of_hessians, lambda_l1, lambda_l2, 0.0f, max_delta_step, 0, 0.0f);
     }
     if (!use_l1) {
       // no smoothing on root node
       cuda_struct->leaf_value =
-        CUDALeafSplits::CalculateSplittedLeafOutput<false, false>(sum_of_gradients, sum_of_hessians, lambda_l1, lambda_l2, 0.0f, 0, 0.0f);
+        CUDALeafSplits::CalculateSplittedLeafOutput<false, false>(sum_of_gradients, sum_of_hessians, lambda_l1, lambda_l2, 0.0f, max_delta_step, 0, 0.0f);
     } else {
       // no smoothing on root node
       cuda_struct->leaf_value =
-        CUDALeafSplits::CalculateSplittedLeafOutput<true, false>(sum_of_gradients, sum_of_hessians, lambda_l1, lambda_l2, 0.0f, 0, 0.0f);
+        CUDALeafSplits::CalculateSplittedLeafOutput<true, false>(sum_of_gradients, sum_of_hessians, lambda_l1, lambda_l2, 0.0f, max_delta_step, 0, 0.0f);
     }
     cuda_struct->data_indices_in_leaf = cuda_data_indices_in_leaf;
     cuda_struct->hist_in_leaf = cuda_hist_in_leaf;
@@ -271,6 +274,7 @@ __global__ void CUDAInitSetValuesKernel(
 __global__ void CUDAInitSetValuesKernel(
   const double lambda_l1,
   const double lambda_l2,
+  const double max_delta_step,
   double* cuda_sum_of_gradients,
   double* cuda_sum_of_hessians,
   int64_t* cuda_sum_of_gradients_hessians,
@@ -290,19 +294,19 @@ __global__ void CUDAInitSetValuesKernel(
     const bool use_l1 = lambda_l1 > 0.0f;
     if (!use_l1) {
       // no smoothing on root node
-      cuda_struct->gain = CUDALeafSplits::GetLeafGain<false, false>(sum_of_gradients, sum_of_hessians, lambda_l1, lambda_l2, 0.0f, 0, 0.0f);
+      cuda_struct->gain = CUDALeafSplits::GetLeafGain<false, false>(sum_of_gradients, sum_of_hessians, lambda_l1, lambda_l2, 0.0f, max_delta_step, 0, 0.0f);
     } else {
       // no smoothing on root node
-      cuda_struct->gain = CUDALeafSplits::GetLeafGain<true, false>(sum_of_gradients, sum_of_hessians, lambda_l1, lambda_l2, 0.0f, 0, 0.0f);
+      cuda_struct->gain = CUDALeafSplits::GetLeafGain<true, false>(sum_of_gradients, sum_of_hessians, lambda_l1, lambda_l2, 0.0f, max_delta_step, 0, 0.0f);
     }
     if (!use_l1) {
       // no smoothing on root node
       cuda_struct->leaf_value =
-        CUDALeafSplits::CalculateSplittedLeafOutput<false, false>(sum_of_gradients, sum_of_hessians, lambda_l1, lambda_l2, 0.0f, 0, 0.0f);
+        CUDALeafSplits::CalculateSplittedLeafOutput<false, false>(sum_of_gradients, sum_of_hessians, lambda_l1, lambda_l2, 0.0f, max_delta_step, 0, 0.0f);
     } else {
       // no smoothing on root node
       cuda_struct->leaf_value =
-        CUDALeafSplits::CalculateSplittedLeafOutput<true, false>(sum_of_gradients, sum_of_hessians, lambda_l1, lambda_l2, 0.0f, 0, 0.0f);
+        CUDALeafSplits::CalculateSplittedLeafOutput<true, false>(sum_of_gradients, sum_of_hessians, lambda_l1, lambda_l2, 0.0f, max_delta_step, 0, 0.0f);
     }
     cuda_struct->data_indices_in_leaf = cuda_data_indices_in_leaf;
     cuda_struct->hist_in_leaf = cuda_hist_in_leaf;
@@ -314,7 +318,7 @@ void CUDALeafSplits::LaunchInitValuesEmptyKernel() {
 }
 
 void CUDALeafSplits::LaunchInitValuesKernel(
-  const double lambda_l1, const double lambda_l2,
+  const double lambda_l1, const double lambda_l2, const double max_delta_step,
   const data_size_t* cuda_bagging_data_indices,
   const data_size_t* cuda_data_indices_in_leaf,
   const data_size_t num_used_indices,
@@ -341,12 +345,12 @@ void CUDALeafSplits::LaunchInitValuesKernel(
     NCCLGroupEnd();
     SynchronizeCUDAStream(cuda_stream, __FILE__, __LINE__);
     CUDAStreamDestroy(cuda_stream);
-    CUDAInitSetValuesKernel<<<1, 1>>>(lambda_l1, lambda_l2, cuda_sum_of_gradients_buffer_.RawData(),
+    CUDAInitSetValuesKernel<<<1, 1>>>(lambda_l1, lambda_l2, max_delta_step, cuda_sum_of_gradients_buffer_.RawData(),
       cuda_sum_of_hessians_buffer_.RawData(), num_used_indices,
       cuda_data_indices_in_leaf, cuda_hist_in_leaf, cuda_struct_.RawData());
   } else {
     CUDAInitValuesKernel2<<<1, NUM_THREADS_PER_BLOCK_LEAF_SPLITS>>>(
-      lambda_l1, lambda_l2,
+      lambda_l1, lambda_l2, max_delta_step,
       num_blocks_init_from_gradients_,
       cuda_sum_of_gradients_buffer_.RawData(),
       cuda_sum_of_hessians_buffer_.RawData(),
@@ -359,7 +363,7 @@ void CUDALeafSplits::LaunchInitValuesKernel(
 }
 
 void CUDALeafSplits::LaunchInitValuesKernel(
-  const double lambda_l1, const double lambda_l2,
+  const double lambda_l1, const double lambda_l2, const double max_delta_step,
   const data_size_t* cuda_bagging_data_indices,
   const data_size_t* cuda_data_indices_in_leaf,
   const data_size_t num_used_indices,
@@ -392,12 +396,12 @@ void CUDALeafSplits::LaunchInitValuesKernel(
     NCCLGroupEnd();
     SynchronizeCUDAStream(cuda_stream, __FILE__, __LINE__);
     CUDAStreamDestroy(cuda_stream);
-    CUDAInitSetValuesKernel<<<1, 1>>>(lambda_l1, lambda_l2, cuda_sum_of_gradients_buffer_.RawData(),
+    CUDAInitSetValuesKernel<<<1, 1>>>(lambda_l1, lambda_l2, max_delta_step, cuda_sum_of_gradients_buffer_.RawData(),
       cuda_sum_of_hessians_buffer_.RawData(), cuda_sum_of_gradients_hessians_buffer_.RawData(), num_used_indices,
       cuda_data_indices_in_leaf, cuda_hist_in_leaf, cuda_struct_.RawData());
   } else {
     CUDAInitValuesKernel4<<<1, NUM_THREADS_PER_BLOCK_LEAF_SPLITS>>>(
-      lambda_l1, lambda_l2,
+      lambda_l1, lambda_l2, max_delta_step,
       num_blocks_init_from_gradients_,
       cuda_sum_of_gradients_buffer_.RawData(),
       cuda_sum_of_hessians_buffer_.RawData(),

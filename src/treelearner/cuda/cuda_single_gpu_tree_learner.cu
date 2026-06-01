@@ -87,6 +87,7 @@ __global__ void CalcRefitLeafOutputKernel(
   const double lambda_l1,
   const double lambda_l2,
   const double path_smooth,
+  const double max_delta_step,
   const double shrinkage_rate,
   const double refit_decay_rate,
   double* leaf_value) {
@@ -98,7 +99,7 @@ __global__ void CalcRefitLeafOutputKernel(
     const double old_leaf_value = leaf_value[leaf_index];
     double new_leaf_value = 0.0f;
     if (!USE_SMOOTHING) {
-      new_leaf_value = CUDALeafSplits::CalculateSplittedLeafOutput<false, false>(sum_gradients, sum_hessians, lambda_l1, lambda_l2, 0.0f, 0, 0.0f);
+      new_leaf_value = CUDALeafSplits::CalculateSplittedLeafOutput<false, false>(sum_gradients, sum_hessians, lambda_l1, lambda_l2, 0.0f, max_delta_step, 0, 0.0f);
     } else {
       const int parent = leaf_parent[leaf_index];
       if (parent >= 0) {
@@ -108,11 +109,11 @@ __global__ void CalcRefitLeafOutputKernel(
         const data_size_t num_data_in_parent = num_data + num_data_in_leaf[sibliing];
         const double parent_output =
           CUDALeafSplits::CalculateSplittedLeafOutput<false, true>(
-            sum_gradients_of_parent, sum_hessians_of_parent, lambda_l1, lambda_l2, 0.0f, 0, 0.0f);
+            sum_gradients_of_parent, sum_hessians_of_parent, lambda_l1, lambda_l2, 0.0f, max_delta_step, 0, 0.0f);
           new_leaf_value = CUDALeafSplits::CalculateSplittedLeafOutput<false, true>(
-          sum_gradients, sum_hessians, lambda_l1, lambda_l2, path_smooth, num_data_in_parent, parent_output);
+          sum_gradients, sum_hessians, lambda_l1, lambda_l2, path_smooth, max_delta_step, num_data_in_parent, parent_output);
       } else {
-        new_leaf_value = CUDALeafSplits::CalculateSplittedLeafOutput<false, false>(sum_gradients, sum_hessians, lambda_l1, lambda_l2, 0.0f, 0, 0.0f);
+        new_leaf_value = CUDALeafSplits::CalculateSplittedLeafOutput<false, false>(sum_gradients, sum_hessians, lambda_l1, lambda_l2, 0.0f, max_delta_step, 0, 0.0f);
       }
     }
     if (isnan(new_leaf_value)) {
@@ -145,7 +146,7 @@ void CUDASingleGPUTreeLearner::LaunchReduceLeafStatKernel(
   #define CalcRefitLeafOutputKernel_ARGS \
     num_leaves, cuda_leaf_gradient_stat_buffer_.RawData(), cuda_leaf_hessian_stat_buffer_.RawData(), num_data_in_leaf, \
     leaf_parent, left_child, right_child, \
-    config_->lambda_l1, config_->lambda_l2, config_->path_smooth, \
+    config_->lambda_l1, config_->lambda_l2, config_->path_smooth, config_->max_delta_step, \
     shrinkage_rate, config_->refit_decay_rate, cuda_leaf_value
 
   if (!use_l1) {
@@ -265,7 +266,7 @@ void CUDASingleGPUTreeLearner::LaunchCalcLeafValuesGivenGradStat(
   #define CalcRefitLeafOutputKernel_ARGS \
     cuda_tree->num_leaves(), cuda_leaf_gradient_stat_buffer_.RawData(), cuda_leaf_hessian_stat_buffer_.RawData(), num_data_in_leaf, \
     cuda_tree->cuda_leaf_parent(), cuda_tree->cuda_left_child(), cuda_tree->cuda_right_child(), \
-    config_->lambda_l1, config_->lambda_l2, config_->path_smooth, \
+    config_->lambda_l1, config_->lambda_l2, config_->path_smooth, config_->max_delta_step, \
     1.0f, config_->refit_decay_rate, cuda_tree->cuda_leaf_value_ref()
   const bool use_l1 = config_->lambda_l1 > 0.0f;
   const bool use_smoothing = config_->path_smooth > 0.0f;
