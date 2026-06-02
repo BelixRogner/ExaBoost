@@ -157,6 +157,14 @@ void CUDAColumnData::CopySubrow(
   feature_mfb_is_zero_ = full_set->feature_mfb_is_zero_;
   feature_mfb_is_na_ = full_set->feature_mfb_is_na_;
   feature_to_column_ = full_set->feature_to_column_;
+  // Propagate the Tier-2 skip flag from the full set. When the full set's
+  // per-column GPU buffers were skipped (e.g. >8GB total — Init() decides),
+  // its data_by_column_ entries are empty. The CopySubrow kernel cannot read
+  // from them, so the subset must also skip per-column allocation and rely on
+  // the compact-view system (BuildCompactColumnView / SetCompactColumnView),
+  // which reads from the subset's CUDARowData and therefore naturally produces
+  // subset-sized buffers per tree.
+  init_skipped_per_column_alloc_ = full_set->init_skipped_per_column_alloc_;
   if (cuda_used_indices_.Size() == 0) {
     // initialize the subset cuda column data
     const size_t num_used_indices_size = static_cast<size_t>(num_used_indices);
@@ -164,31 +172,33 @@ void CUDAColumnData::CopySubrow(
     for (int column_index = 0; column_index < num_columns_; ++column_index) {
       data_by_column_.emplace_back(new CUDAVector<uint8_t>());
     }
-    OMP_INIT_EX();
-    #pragma omp parallel num_threads(num_threads_)
-    {
-      SetCUDADevice(gpu_device_id_, __FILE__, __LINE__);
-      #pragma omp for schedule(static)
-      for (int column_index = 0; column_index < num_columns_; ++column_index) {
-        OMP_LOOP_EX_BEGIN();
-        const uint8_t bit_type = column_bit_type_[column_index];
-        if (bit_type == 8) {
-          CUDAVector<uint8_t> column_data;
-          column_data.Resize(num_used_indices_size);
-          data_by_column_[column_index]->MoveFrom(column_data, sizeof(uint8_t) * column_data.Size());
-        } else if (bit_type == 16) {
-          CUDAVector<uint16_t> column_data;
-          column_data.Resize(num_used_indices_size);
-          data_by_column_[column_index]->MoveFrom(column_data, sizeof(uint16_t) * column_data.Size());
-        } else if (bit_type == 32) {
-          CUDAVector<uint32_t> column_data;
-          column_data.Resize(num_used_indices_size);
-          data_by_column_[column_index]->MoveFrom(column_data, sizeof(uint32_t) * column_data.Size());
+    if (!init_skipped_per_column_alloc_) {
+      OMP_INIT_EX();
+      #pragma omp parallel num_threads(num_threads_)
+      {
+        SetCUDADevice(gpu_device_id_, __FILE__, __LINE__);
+        #pragma omp for schedule(static)
+        for (int column_index = 0; column_index < num_columns_; ++column_index) {
+          OMP_LOOP_EX_BEGIN();
+          const uint8_t bit_type = column_bit_type_[column_index];
+          if (bit_type == 8) {
+            CUDAVector<uint8_t> column_data;
+            column_data.Resize(num_used_indices_size);
+            data_by_column_[column_index]->MoveFrom(column_data, sizeof(uint8_t) * column_data.Size());
+          } else if (bit_type == 16) {
+            CUDAVector<uint16_t> column_data;
+            column_data.Resize(num_used_indices_size);
+            data_by_column_[column_index]->MoveFrom(column_data, sizeof(uint16_t) * column_data.Size());
+          } else if (bit_type == 32) {
+            CUDAVector<uint32_t> column_data;
+            column_data.Resize(num_used_indices_size);
+            data_by_column_[column_index]->MoveFrom(column_data, sizeof(uint32_t) * column_data.Size());
+          }
+          OMP_LOOP_EX_END();
         }
-        OMP_LOOP_EX_END();
       }
+      OMP_THROW_EX();
     }
-    OMP_THROW_EX();
     cuda_data_by_column_.InitFromHostVector(GetDataByColumnPointers(data_by_column_));
     InitColumnMetaInfo();
     cur_subset_buffer_size_ = num_used_indices;
@@ -200,7 +210,11 @@ void CUDAColumnData::CopySubrow(
   }
   cuda_used_indices_.InitFromHostMemory(used_indices, static_cast<size_t>(num_used_indices));
   num_used_indices_ = num_used_indices;
-  LaunchCopySubrowKernel(full_set->cuda_data_by_column());
+  // In the skipped path full_set has no per-column buffers to copy from; the
+  // subset's per-tree buffers come from the compact-view system instead.
+  if (!init_skipped_per_column_alloc_) {
+    LaunchCopySubrowKernel(full_set->cuda_data_by_column());
+  }
   SynchronizeCUDADevice(__FILE__, __LINE__);
 }
 
