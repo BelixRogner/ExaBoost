@@ -386,7 +386,10 @@ def test_cuda_cegb_matches_cpu(cegb_overrides):
 
     # predictions must match at FP epsilon
     np.testing.assert_allclose(
-        boosters["cpu"].predict(X), boosters["cuda"].predict(X), rtol=0, atol=1e-10,
+        boosters["cpu"].predict(X),
+        boosters["cuda"].predict(X),
+        rtol=0,
+        atol=1e-10,
         err_msg=f"cegb={cegb_overrides}: CUDA diverges from CPU",
     )
 
