@@ -42,12 +42,15 @@ def _get_init_score(device_type, objective, alpha, X, y):
     for line in buf.getvalue().splitlines():
         if "Start training from score" in line:
             return float(line.split("score")[-1].strip())
-    raise AssertionError(f"no init score logged for {device_type} {objective} alpha={alpha}")
+    raise AssertionError(
+        f"no init score logged for {device_type} {objective} alpha={alpha}"
+    )
 
 
 @_REQUIRES_CUDA
 @pytest.mark.parametrize(
-    ("objective", "alpha"), [("regression_l1", 0.5), ("quantile", 0.5), ("quantile", 0.3), ("quantile", 0.7)]
+    ("objective", "alpha"),
+    [("regression_l1", 0.5), ("quantile", 0.5), ("quantile", 0.3), ("quantile", 0.7)],
 )
 @pytest.mark.parametrize("n", [5, 7, 10, 11, 100, 500])
 def test_cuda_init_score_matches_cpu(objective, alpha, n):
@@ -62,7 +65,9 @@ def test_cuda_init_score_matches_cpu(objective, alpha, n):
     y = np.arange(1, n + 1, dtype=np.float64)
     cpu = _get_init_score("cpu", objective, alpha, X, y)
     cuda = _get_init_score("cuda", objective, alpha, X, y)
-    assert cuda == pytest.approx(cpu, abs=1e-6), f"{objective} alpha={alpha} n={n}: cpu={cpu} cuda={cuda}"
+    assert cuda == pytest.approx(cpu, abs=1e-6), (
+        f"{objective} alpha={alpha} n={n}: cpu={cpu} cuda={cuda}"
+    )
 
 
 _REQUIRES_CUDA = pytest.mark.skipif(
@@ -83,7 +88,9 @@ def test_cuda_weighted_percentile_renewal_does_not_crash(objective, n):
     X = rng.standard_normal((n, 3)).astype(np.float64)
     y = rng.standard_normal(n).astype(np.float64)
     w = rng.random(n)
-    ds = lgb.Dataset(X, label=y, weight=w, params={"verbose": -1, "feature_pre_filter": False})
+    ds = lgb.Dataset(
+        X, label=y, weight=w, params={"verbose": -1, "feature_pre_filter": False}
+    )
     params = {
         "objective": objective,
         "alpha": 0.5,
@@ -97,7 +104,9 @@ def test_cuda_weighted_percentile_renewal_does_not_crash(objective, n):
     # If the OOB access regresses, this raises a CUDA "illegal memory access" error.
     bst = lgb.train(params, ds, num_boost_round=2)
     preds = bst.predict(X, raw_score=True)
-    assert np.all(np.isfinite(preds)), "weighted percentile renewal produced non-finite predictions"
+    assert np.all(np.isfinite(preds)), (
+        "weighted percentile renewal produced non-finite predictions"
+    )
 
 
 @pytest.mark.skipif(
@@ -109,7 +118,12 @@ def test_cpu_and_gpu_work():
     X, y = load_breast_cancer(return_X_y=True)
     data = lgb.Dataset(X, y)
 
-    params_cpu = {"verbosity": -1, "num_leaves": 31, "objective": "binary", "device": "cpu"}
+    params_cpu = {
+        "verbosity": -1,
+        "num_leaves": 31,
+        "objective": "binary",
+        "device": "cpu",
+    }
     cpu_bst = lgb.train(params_cpu, data, num_boost_round=10)
     cpu_score = log_loss(y, cpu_bst.predict(X))
 
@@ -267,7 +281,9 @@ def _train_pair(params_overrides, X, y):
             "force_col_wise": True,
             **params_overrides,
         }
-        ds = lgb.Dataset(X, label=y, params={"verbose": -1, "feature_pre_filter": False})
+        ds = lgb.Dataset(
+            X, label=y, params={"verbose": -1, "feature_pre_filter": False}
+        )
         out[device_type] = lgb.train(params, ds, num_boost_round=1)
     return out
 
@@ -319,3 +335,57 @@ def test_cuda_respects_max_depth(max_depth, num_leaves):
         f"CPU/CUDA depth mismatch with max_depth={max_depth}, num_leaves={num_leaves}: "
         f"cpu={cpu_depth}, cuda={cuda_depth}"
     )
+
+
+@_REQUIRES_CUDA
+@pytest.mark.parametrize("n", [120, 150, 159, 200, 250])
+@pytest.mark.parametrize("num_leaves", [7, 15, 31])
+def test_cuda_data_partition_block_offset_no_overflow(n, num_leaves):
+    """CUDA training must match CPU when a split processes a leaf whose grid
+    exceeds the full-dataset grid.
+
+    Regression guard for the out-of-bounds __global__ write in
+    GenDataToLeftBitVectorKernel's PrepareOffset. CUDADataPartition::CalcBlockDim
+    is non-monotonic (the per-block data count is rounded up to a power of two),
+    so a leaf in the ~101-160 range can need more blocks than the full dataset,
+    while cuda_block_data_to_{left,right}_offset_ were sized only for the
+    full-dataset grid. compute-sanitizer flags the overflow as an invalid device
+    write; the fix grows those buffers on demand in CUDADataPartition::Split.
+
+    The bug is silent on most allocators (the overflow stays within the
+    allocation's slack, so predictions remain bit-identical), which is exactly
+    why it went unnoticed -- this parity test pins the scenario so any future
+    change that makes the overflow corrupt results, or that reintroduces the
+    crash on a stricter allocator, is caught. Run under compute-sanitizer to see
+    the underlying memory error without the fix.
+    """
+    rng = np.random.default_rng(11)
+    d = 8
+    X = rng.standard_normal((n, d)).astype(np.float64)
+    coef = rng.standard_normal(d)
+    y = (X @ coef + 0.1 * rng.standard_normal(n)).astype(np.float64)
+
+    preds = {}
+    for device_type in ("cpu", "cuda"):
+        params = {
+            "objective": "regression",
+            "verbose": -1,
+            "deterministic": True,
+            "num_threads": 1,
+            "seed": 42,
+            "feature_pre_filter": False,
+            "device_type": device_type,
+            "gpu_use_dp": True,
+            "force_col_wise": True,
+            "num_leaves": num_leaves,
+            "learning_rate": 0.1,
+            "min_data_in_leaf": 5,
+        }
+        ds = lgb.Dataset(
+            X, label=y, params={"verbose": -1, "feature_pre_filter": False}
+        )
+        bst = lgb.train(params, ds, num_boost_round=5)
+        preds[device_type] = bst.predict(X, raw_score=True)
+
+    assert np.all(np.isfinite(preds["cuda"])), "CUDA produced non-finite predictions"
+    np.testing.assert_allclose(preds["cuda"], preds["cpu"], atol=1e-10)

@@ -140,6 +140,26 @@ void CUDADataPartition::Split(
   data_size_t* global_left_leaf_num_data,
   data_size_t* global_right_leaf_num_data) {
   CalcBlockDim(num_data_in_leaf);
+  // CalcBlockDim is non-monotonic in num_data_in_leaf: the per-block data count is
+  // rounded up to a power of two, so a *smaller* leaf can require *more* blocks than
+  // the full dataset does (e.g. grid(200)=50 but grid(140)=70 with SPLIT=1024). The
+  // per-block offset buffers, however, were sized once for the full-data grid
+  // (max_num_split_indices_blocks_ = grid_dim_ at construction / ResetTrainingData).
+  // A leaf whose grid_dim_ exceeds that capacity -- e.g. the bagged root
+  // (~bagging_fraction * num_data), or any non-bagged leaf in the ~101-160 range on a
+  // dataset whose full-data grid is smaller -- makes GenDataToLeftBitVectorKernel's
+  // PrepareOffset write block_to_{left,right}_offset_buffer[blockIdx.x + 1] past the
+  // end of cuda_block_data_to_{left,right}_offset_. compute-sanitizer flags this as an
+  // out-of-bounds __global__ write; depending on the device allocation layout it
+  // silently corrupts adjacent memory or faults outright. Grow the buffers on demand
+  // here, mirroring the resize logic in ResetTrainingData.
+  if (grid_dim_ > max_num_split_indices_blocks_) {
+    max_num_split_indices_blocks_ = grid_dim_;
+    cuda_block_data_to_left_offset_.Resize(static_cast<size_t>(max_num_split_indices_blocks_) + 1);
+    cuda_block_data_to_right_offset_.Resize(static_cast<size_t>(max_num_split_indices_blocks_) + 1);
+    SetCUDAMemory<data_size_t>(cuda_block_data_to_left_offset_.RawData(), 0, static_cast<size_t>(max_num_split_indices_blocks_) + 1, __FILE__, __LINE__);
+    SetCUDAMemory<data_size_t>(cuda_block_data_to_right_offset_.RawData(), 0, static_cast<size_t>(max_num_split_indices_blocks_) + 1, __FILE__, __LINE__);
+  }
   global_timer.Start("GenDataToLeftBitVector");
   GenDataToLeftBitVector(num_data_in_leaf,
                          leaf_best_split_feature,
