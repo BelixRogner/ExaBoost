@@ -374,10 +374,7 @@ def test_cuda_monotone_constraints_are_enforced(constraints, num_boost_round):
     """
     bst, _, _ = _train_monotone("cuda", constraints, num_boost_round)
     count, worst = _monotonicity_violations(bst, constraints)
-    assert count == 0, (
-        f"CUDA model violates monotone constraints {constraints}: "
-        f"{count} violations, worst={worst:.3e}"
-    )
+    assert count == 0, f"CUDA model violates monotone constraints {constraints}: {count} violations, worst={worst:.3e}"
 
 
 @_REQUIRES_CUDA
@@ -413,7 +410,10 @@ def test_cuda_monotone_noop_constraints_match_cpu_exactly(num_boost_round):
     bst_cpu, X, _ = _train_monotone("cpu", [0, 0, 0], num_boost_round)
     bst_cuda, _, _ = _train_monotone("cuda", [0, 0, 0], num_boost_round)
     np.testing.assert_allclose(
-        bst_cpu.predict(X), bst_cuda.predict(X), rtol=0, atol=1e-10,
+        bst_cpu.predict(X),
+        bst_cuda.predict(X),
+        rtol=0,
+        atol=1e-10,
         err_msg="all-zero monotone constraints must not change CUDA results",
     )
 
