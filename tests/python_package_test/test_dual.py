@@ -373,8 +373,9 @@ def test_cuda_max_delta_step_caps_outputs_like_cpu(objective, max_delta_step):
     """
     spreads = {}
     for device_type in ("cpu", "cuda"):
-        bst, _, _ = _train_mds(device_type, objective, max_delta_step,
-                               learning_rate=1.0, num_boost_round=1, min_data_in_leaf=1)
+        bst, _, _ = _train_mds(
+            device_type, objective, max_delta_step, learning_rate=1.0, num_boost_round=1, min_data_in_leaf=1
+        )
         values = _tree_leaf_values(bst)
         spreads[device_type] = max(values) - min(values)
         assert spreads[device_type] <= 2 * max_delta_step + 1e-9, (
@@ -398,11 +399,15 @@ def test_cuda_max_delta_step_matches_cpu_exactly(max_delta_step):
     """
     preds = {}
     for device_type in ("cpu", "cuda"):
-        bst, X, _ = _train_mds(device_type, "regression", max_delta_step,
-                               learning_rate=0.1, num_boost_round=10, min_data_in_leaf=5)
+        bst, X, _ = _train_mds(
+            device_type, "regression", max_delta_step, learning_rate=0.1, num_boost_round=10, min_data_in_leaf=5
+        )
         preds[device_type] = bst.predict(X, raw_score=True)
     np.testing.assert_allclose(
-        preds["cpu"], preds["cuda"], rtol=0, atol=1e-10,
+        preds["cpu"],
+        preds["cuda"],
+        rtol=0,
+        atol=1e-10,
         err_msg=f"max_delta_step={max_delta_step}: CUDA diverges from CPU",
     )
 
@@ -420,8 +425,9 @@ def test_cuda_max_delta_step_loss_matches_cpu_when_saturated(objective):
     max_delta_step = 0.05
     losses = {}
     for device_type in ("cpu", "cuda"):
-        bst, X, y = _train_mds(device_type, objective, max_delta_step,
-                               learning_rate=0.1, num_boost_round=10, min_data_in_leaf=5)
+        bst, X, y = _train_mds(
+            device_type, objective, max_delta_step, learning_rate=0.1, num_boost_round=10, min_data_in_leaf=5
+        )
         # cap still enforced on every tree
         for t in range(10):
             values = _tree_leaf_values(bst, t)
