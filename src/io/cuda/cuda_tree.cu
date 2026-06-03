@@ -403,6 +403,26 @@ void CUDATree::LaunchAddPredictionToScoreKernel(
   double* score) const {
   const CUDAColumnData* cuda_column_data = data->cuda_column_data();
   const int num_blocks = (num_data + num_threads_per_block_add_prediction_to_score_ - 1) / num_threads_per_block_add_prediction_to_score_;
+  // ToHost() frees the per-tree GPU tree-structure arrays to bound device memory
+  // across many boosting rounds, keeping only cuda_leaf_value_. This kernel,
+  // however, traverses the *whole* tree (split_feature_inner / children /
+  // thresholds / decision_type), so when it runs post-ToHost -- which happens in
+  // GBDT::UpdateScore's out-of-bag pass under bagging -- those arrays are empty
+  // and the kernel dereferences freed/null device pointers, crashing with
+  // "an illegal memory access was encountered". Re-upload the structure from the
+  // (still-populated, shrunk-to-n_internal) host arrays for the duration of this
+  // launch, then free it again so the memory optimization is preserved. Stumps
+  // (num_leaves_ <= 1) have no internal nodes and never enter the traversal.
+  const bool restore_tree_structure =
+    num_leaves_ > 1 && cuda_split_feature_inner_.Size() == 0;
+  if (restore_tree_structure) {
+    CUDATree* self = const_cast<CUDATree*>(this);
+    self->cuda_left_child_.InitFromHostVector(left_child_);
+    self->cuda_right_child_.InitFromHostVector(right_child_);
+    self->cuda_split_feature_inner_.InitFromHostVector(split_feature_inner_);
+    self->cuda_threshold_in_bin_.InitFromHostVector(threshold_in_bin_);
+    self->cuda_decision_type_.InitFromHostVector(decision_type_);
+  }
   if (used_data_indices == nullptr) {
     AddPredictionToScoreKernel<false><<<num_blocks, num_threads_per_block_add_prediction_to_score_>>>(
       // dataset information
@@ -453,6 +473,14 @@ void CUDATree::LaunchAddPredictionToScoreKernel(
       score);
   }
   SynchronizeCUDADevice(__FILE__, __LINE__);
+  if (restore_tree_structure) {
+    CUDATree* self = const_cast<CUDATree*>(this);
+    self->cuda_left_child_.Clear();
+    self->cuda_right_child_.Clear();
+    self->cuda_split_feature_inner_.Clear();
+    self->cuda_threshold_in_bin_.Clear();
+    self->cuda_decision_type_.Clear();
+  }
 }
 
 }  // namespace LightGBM

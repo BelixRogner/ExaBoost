@@ -43,12 +43,15 @@ def _get_init_score(device_type, objective, alpha, X, y):
     for line in buf.getvalue().splitlines():
         if "Start training from score" in line:
             return float(line.split("score")[-1].strip())
-    raise AssertionError(f"no init score logged for {device_type} {objective} alpha={alpha}")
+    raise AssertionError(
+        f"no init score logged for {device_type} {objective} alpha={alpha}"
+    )
 
 
 @_REQUIRES_CUDA
 @pytest.mark.parametrize(
-    ("objective", "alpha"), [("regression_l1", 0.5), ("quantile", 0.5), ("quantile", 0.3), ("quantile", 0.7)]
+    ("objective", "alpha"),
+    [("regression_l1", 0.5), ("quantile", 0.5), ("quantile", 0.3), ("quantile", 0.7)],
 )
 @pytest.mark.parametrize("n", [5, 7, 10, 11, 100, 500])
 def test_cuda_init_score_matches_cpu(objective, alpha, n):
@@ -63,7 +66,9 @@ def test_cuda_init_score_matches_cpu(objective, alpha, n):
     y = np.arange(1, n + 1, dtype=np.float64)
     cpu = _get_init_score("cpu", objective, alpha, X, y)
     cuda = _get_init_score("cuda", objective, alpha, X, y)
-    assert cuda == pytest.approx(cpu, abs=1e-6), f"{objective} alpha={alpha} n={n}: cpu={cpu} cuda={cuda}"
+    assert cuda == pytest.approx(cpu, abs=1e-6), (
+        f"{objective} alpha={alpha} n={n}: cpu={cpu} cuda={cuda}"
+    )
 
 
 _REQUIRES_CUDA = pytest.mark.skipif(
@@ -84,7 +89,9 @@ def test_cuda_weighted_percentile_renewal_does_not_crash(objective, n):
     X = rng.standard_normal((n, 3)).astype(np.float64)
     y = rng.standard_normal(n).astype(np.float64)
     w = rng.random(n)
-    ds = lgb.Dataset(X, label=y, weight=w, params={"verbose": -1, "feature_pre_filter": False})
+    ds = lgb.Dataset(
+        X, label=y, weight=w, params={"verbose": -1, "feature_pre_filter": False}
+    )
     params = {
         "objective": objective,
         "alpha": 0.5,
@@ -98,7 +105,9 @@ def test_cuda_weighted_percentile_renewal_does_not_crash(objective, n):
     # If the OOB access regresses, this raises a CUDA "illegal memory access" error.
     bst = lgb.train(params, ds, num_boost_round=2)
     preds = bst.predict(X, raw_score=True)
-    assert np.all(np.isfinite(preds)), "weighted percentile renewal produced non-finite predictions"
+    assert np.all(np.isfinite(preds)), (
+        "weighted percentile renewal produced non-finite predictions"
+    )
 
 
 @pytest.mark.skipif(
@@ -110,7 +119,12 @@ def test_cpu_and_gpu_work():
     X, y = load_breast_cancer(return_X_y=True)
     data = lgb.Dataset(X, y)
 
-    params_cpu = {"verbosity": -1, "num_leaves": 31, "objective": "binary", "device": "cpu"}
+    params_cpu = {
+        "verbosity": -1,
+        "num_leaves": 31,
+        "objective": "binary",
+        "device": "cpu",
+    }
     cpu_bst = lgb.train(params_cpu, data, num_boost_round=10)
     cpu_score = log_loss(y, cpu_bst.predict(X))
 
@@ -268,7 +282,9 @@ def _train_pair(params_overrides, X, y):
             "force_col_wise": True,
             **params_overrides,
         }
-        ds = lgb.Dataset(X, label=y, params={"verbose": -1, "feature_pre_filter": False})
+        ds = lgb.Dataset(
+            X, label=y, params={"verbose": -1, "feature_pre_filter": False}
+        )
         out[device_type] = lgb.train(params, ds, num_boost_round=1)
     return out
 
@@ -441,4 +457,86 @@ def test_cuda_forced_splits_match_cpu(case, num_leaves, seed, tmp_path):
         rtol=0,
         atol=1e-10,
         err_msg=f"forced splits case={case}: CUDA diverges from CPU",
+    )
+
+
+@_REQUIRES_CUDA
+@pytest.mark.parametrize(
+    ("n", "num_leaves", "bagging_fraction", "bagging_freq"),
+    [
+        (200, 7, 0.7, 1),
+        (500, 15, 0.5, 1),
+        (1000, 31, 0.8, 3),
+        (2000, 31, 0.7, 1),
+    ],
+)
+def test_cuda_bagging_does_not_crash_and_matches_cpu(
+    n, num_leaves, bagging_fraction, bagging_freq
+):
+    """CUDA training with bagging must not crash and must track CPU.
+
+    Regression test for two independent CUDA bugs that made *any* bagged run
+    abort with "[CUDA] an illegal memory access was encountered":
+
+    1. ``CUDATree::ToHost()`` freed the per-tree GPU tree-structure arrays
+       (split_feature_inner / children / thresholds / decision_type), keeping
+       only ``cuda_leaf_value_``, to bound device memory across many rounds.
+       But ``AddPredictionToScoreKernel`` traverses the whole tree, and the
+       GBDT out-of-bag score update (only reached under bagging) launches it
+       post-ToHost, dereferencing the freed/null device pointers. Fixed by
+       re-uploading the structure for that launch (and freeing it again).
+    2. ``CUDADataPartition::CalcBlockDim`` is non-monotonic, so a bagged leaf
+       (~bagging_fraction * n, landing in the ~101-160 band) needs more blocks
+       than the full dataset, overflowing the per-block offset buffers. (Fixed
+       separately; this test also guards against it regressing into a crash.)
+
+    Before the fixes this test aborted the interpreter. After them, CPU and
+    CUDA agree to within the floating-point / RNG divergence documented as
+    expected for the CUDA tree learner in upstream issue #6055 (different bag
+    sampling => a generous tolerance, the point of the test is no-crash +
+    finite + same ballpark).
+    """
+    rng = np.random.default_rng(11)
+    d = 8
+    X = rng.standard_normal((n, d)).astype(np.float64)
+    coef = rng.standard_normal(d)
+    y = (X @ coef + 0.3 * rng.standard_normal(n)).astype(np.float64)
+
+    preds = {}
+    for device_type in ("cpu", "cuda"):
+        params = {
+            "objective": "regression",
+            "verbose": -1,
+            "deterministic": True,
+            "num_threads": 1,
+            "seed": 7,
+            "feature_pre_filter": False,
+            "device_type": device_type,
+            "gpu_use_dp": True,
+            "force_col_wise": True,
+            "num_leaves": num_leaves,
+            "learning_rate": 0.05,
+            "min_data_in_leaf": 5,
+            "bagging_fraction": bagging_fraction,
+            "bagging_freq": bagging_freq,
+            "bagging_seed": 3,
+        }
+        ds = lgb.Dataset(
+            X, label=y, params={"verbose": -1, "feature_pre_filter": False}
+        )
+        bst = lgb.train(params, ds, num_boost_round=20)
+        preds[device_type] = bst.predict(X, raw_score=True)
+
+    assert np.all(np.isfinite(preds["cuda"])), (
+        "CUDA bagging produced non-finite predictions"
+    )
+    # Bagging samples a different bag on CUDA than on CPU (different RNG stream),
+    # so predictions are not bit-identical; #6055 documents this as expected.
+    # The bar here is "same ballpark" -- strict enough to catch a model that
+    # silently trained on garbage, loose enough to tolerate bag-sampling drift.
+    max_abs = float(np.abs(preds["cpu"] - preds["cuda"]).max())
+    y_range = float(y.max() - y.min())
+    assert max_abs < 0.25 * y_range, (
+        f"CPU/CUDA bagging predictions diverge far more than bag-sampling drift: "
+        f"max|Δ|={max_abs:.4f}, y_range={y_range:.4f}"
     )
