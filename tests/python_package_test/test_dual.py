@@ -345,19 +345,21 @@ def _train_forced(device_type, forced_split, tmp_path, num_boost_round=10, num_l
 _FORCED_SPLIT_CASES = {
     "root_only": {"feature": 2, "threshold": 0.5},
     "root_nested": {
-        "feature": 2, "threshold": 0.5,
+        "feature": 2,
+        "threshold": 0.5,
         "left": {"feature": 2, "threshold": 0.25},
         "right": {"feature": 2, "threshold": 0.75},
     },
     "root_lr_mixed": {
-        "feature": 1, "threshold": 0.4,
+        "feature": 1,
+        "threshold": 0.4,
         "left": {"feature": 0, "threshold": 0.3},
         "right": {"feature": 3, "threshold": 0.6},
     },
     "three_deep_chain": {
-        "feature": 2, "threshold": 0.5,
-        "left": {"feature": 0, "threshold": 0.5,
-                 "left": {"feature": 1, "threshold": 0.5}},
+        "feature": 2,
+        "threshold": 0.5,
+        "left": {"feature": 0, "threshold": 0.5, "left": {"feature": 1, "threshold": 0.5}},
     },
 }
 
@@ -406,10 +408,8 @@ def test_cuda_forced_splits_match_cpu(case, num_leaves, seed, tmp_path):
     structure (split features, gains, counts, leaf values) must match exactly.
     """
     forced_split = _FORCED_SPLIT_CASES[case]
-    bst_cpu, X, _ = _train_forced("cpu", forced_split, tmp_path,
-                                  num_boost_round=30, num_leaves=num_leaves, seed=seed)
-    bst_cuda, _, _ = _train_forced("cuda", forced_split, tmp_path,
-                                   num_boost_round=30, num_leaves=num_leaves, seed=seed)
+    bst_cpu, X, _ = _train_forced("cpu", forced_split, tmp_path, num_boost_round=30, num_leaves=num_leaves, seed=seed)
+    bst_cuda, _, _ = _train_forced("cuda", forced_split, tmp_path, num_boost_round=30, num_leaves=num_leaves, seed=seed)
 
     # tree-0 structure equality (features, gains, counts, leaf values; thresholds may
     # differ in real-value display encoding for the same bin boundary)
@@ -431,6 +431,9 @@ def test_cuda_forced_splits_match_cpu(case, num_leaves, seed, tmp_path):
 
     # prediction parity over all rounds
     np.testing.assert_allclose(
-        bst_cpu.predict(X), bst_cuda.predict(X), rtol=0, atol=1e-10,
+        bst_cpu.predict(X),
+        bst_cuda.predict(X),
+        rtol=0,
+        atol=1e-10,
         err_msg=f"forced splits case={case}: CUDA diverges from CPU",
     )
