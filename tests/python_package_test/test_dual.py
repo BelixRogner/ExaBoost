@@ -385,6 +385,9 @@ def test_cuda_feature_contri_matches_cpu(feature_contri):
 
     # predictions match at FP epsilon
     np.testing.assert_allclose(
-        boosters["cpu"].predict(X), boosters["cuda"].predict(X), rtol=0, atol=1e-10,
+        boosters["cpu"].predict(X),
+        boosters["cuda"].predict(X),
+        rtol=0,
+        atol=1e-10,
         err_msg=f"feature_contri={feature_contri}: CUDA diverges from CPU",
     )
