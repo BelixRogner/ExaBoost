@@ -19,6 +19,8 @@
 #include <LightGBM/objective_function.h>
 
 #include <algorithm>
+#include <chrono>
+#include <cstdlib>
 #include <memory>
 #include <vector>
 
@@ -168,6 +170,10 @@ void CUDASingleGPUTreeLearner::BeforeTrain() {
   cuda_larger_leaf_splits_->InitValues();
   col_sampler_.ResetByTree();
   cuda_best_split_finder_->BeforeTrain(col_sampler_.is_feature_used_bytree());
+  cuda_histogram_constructor_->SetFeatureUsedBytree(col_sampler_.is_feature_used_bytree());
+  cuda_histogram_constructor_->BuildCompactView(col_sampler_.is_feature_used_bytree());
+  // Build per-tree compact column data for the partition kernels.
+  BuildCompactColumnView();
   leaf_data_start_[0] = 0;
   smaller_leaf_index_ = 0;
   larger_leaf_index_ = -1;
@@ -184,6 +190,106 @@ void CUDASingleGPUTreeLearner::BeforeTrain() {
     leaf_to_hist_index_map_[0] = 0;
     global_num_data_in_leaf_[0] = global_num_data_;
   }
+}
+
+// Forward decl: defined in cuda_histogram_constructor.cu.
+extern void LaunchRowToColCompactKernel(
+    cudaStream_t stream,
+    const uint8_t* src_data,
+    uint8_t* compact_col_buf,
+    const size_t* slot_p_byte,
+    const int* slot_p_stride,
+    const int* slot_col_in_p,
+    int num_compact_cols,
+    data_size_t num_data);
+
+void CUDASingleGPUTreeLearner::BuildCompactColumnView() {
+  const auto* row_data = cuda_histogram_constructor_->cuda_row_data_internal();
+  if (row_data == nullptr) return;
+  const uint8_t* src = row_data->GetBin<uint8_t>();
+  if (src == nullptr) return;  // host-mapped path; not supported here
+  if (row_data->bit_type() != 8 || row_data->is_sparse()) return;  // only dense uint8 path supported
+
+  const auto& bytree_mask = col_sampler_.is_feature_used_bytree();
+  uint64_t sig = 0;
+  for (size_t i = 0; i < bytree_mask.size(); ++i) {
+    if (bytree_mask[i]) sig = sig * 1099511628211ULL ^ static_cast<uint64_t>(i + 1);
+  }
+  if (sig == compact_col_signature_ && !compact_column_to_orig_.empty()) {
+    // Cache hit: layout unchanged → pointers still valid.
+    return;
+  }
+
+  // Build column->slot mapping. CUDAColumnData uses column index, not feature index.
+  // For dense single-feature groups (Numerai), feature_to_column[f] returns the column index.
+  CUDAColumnData* col_data = const_cast<CUDAColumnData*>(train_data_->cuda_column_data());
+  const int num_features = static_cast<int>(bytree_mask.size());
+  const int num_total_cols = static_cast<int>(row_data->host_feature_partition_column_index_offsets().back());
+
+  orig_column_to_compact_slot_.assign(num_total_cols, -1);
+  compact_column_to_orig_.clear();
+  for (int f = 0; f < num_features; ++f) {
+    if (!bytree_mask[f]) continue;
+    int c = col_data->feature_to_column(f);
+    if (c < 0 || c >= num_total_cols) continue;
+    if (orig_column_to_compact_slot_[c] < 0) {
+      orig_column_to_compact_slot_[c] = static_cast<int>(compact_column_to_orig_.size());
+      compact_column_to_orig_.push_back(c);
+    }
+  }
+  const int num_compact_cols = static_cast<int>(compact_column_to_orig_.size());
+  if (num_compact_cols == 0) return;
+
+  const data_size_t num_data = row_data->num_data();
+  const size_t needed_bytes = static_cast<size_t>(num_compact_cols) * static_cast<size_t>(num_data);
+  if (compact_column_buffer_.Size() < needed_bytes) {
+    compact_column_buffer_.Resize(needed_bytes);
+  }
+
+  // Build per-slot source-frame metadata host-side (one entry per compact slot).
+  const auto& src_part_col_offsets_h = row_data->host_feature_partition_column_index_offsets();
+  std::vector<size_t> slot_p_byte_h(num_compact_cols);
+  std::vector<int> slot_p_stride_h(num_compact_cols);
+  std::vector<int> slot_col_in_p_h(num_compact_cols);
+  for (int s = 0; s < num_compact_cols; ++s) {
+    const int orig_col = compact_column_to_orig_[s];
+    int p = 0;
+    while (p + 1 < static_cast<int>(src_part_col_offsets_h.size()) &&
+           orig_col >= src_part_col_offsets_h[p + 1]) ++p;
+    const int p_start = src_part_col_offsets_h[p];
+    const int p_end = src_part_col_offsets_h[p + 1];
+    slot_p_byte_h[s] = static_cast<size_t>(p_start) * static_cast<size_t>(num_data);
+    slot_p_stride_h[s] = p_end - p_start;
+    slot_col_in_p_h[s] = orig_col - p_start;
+  }
+  if (cuda_slot_p_byte_.Size() < static_cast<size_t>(num_compact_cols)) {
+    cuda_slot_p_byte_.Resize(num_compact_cols);
+    cuda_slot_p_stride_.Resize(num_compact_cols);
+    cuda_slot_col_in_p_.Resize(num_compact_cols);
+  }
+  CopyFromHostToCUDADevice<size_t>(cuda_slot_p_byte_.RawData(), slot_p_byte_h.data(),
+                                   num_compact_cols, __FILE__, __LINE__);
+  CopyFromHostToCUDADevice<int>(cuda_slot_p_stride_.RawData(), slot_p_stride_h.data(),
+                                num_compact_cols, __FILE__, __LINE__);
+  CopyFromHostToCUDADevice<int>(cuda_slot_col_in_p_.RawData(), slot_col_in_p_h.data(),
+                                num_compact_cols, __FILE__, __LINE__);
+
+  LaunchRowToColCompactKernel(
+      0,
+      src,
+      compact_column_buffer_.RawData(),
+      cuda_slot_p_byte_.RawData(),
+      cuda_slot_p_stride_.RawData(),
+      cuda_slot_col_in_p_.RawData(),
+      num_compact_cols,
+      num_data);
+  CUDASUCCESS_OR_FATAL(cudaDeviceSynchronize());
+
+  // Update CUDAColumnData's data_by_column_ pointers to slots in compact buffer.
+  col_data->SetCompactColumnView(orig_column_to_compact_slot_,
+                                 compact_column_buffer_.RawData(),
+                                 static_cast<size_t>(num_data));
+  compact_col_signature_ = sig;
 }
 
 void CUDASingleGPUTreeLearner::AddPredictionToScore(const Tree* tree, double* out_score) const {
@@ -387,6 +493,11 @@ Tree* CUDASingleGPUTreeLearner::Train(const score_t* gradients,
                                        best_split_info);
     }
 
+    // The right leaf is a freshly allocated hist slot that hasn't been zeroed.
+    // Zero it now so the next iter's ConstructHistogramForLeaf can atomicAdd
+    // into it correctly. (left leaf keeps the parent slot, which already holds
+    // the parent hist; SubtractHistogramKernel then computes left = parent - smaller.)
+    cuda_histogram_constructor_->ZeroHistForLeaf(right_leaf_index);
     cuda_data_partition_->Split(best_split_info,
                                 best_leaf_index_,
                                 right_leaf_index,

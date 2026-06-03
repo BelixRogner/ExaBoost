@@ -125,82 +125,10 @@ def test_cpu_and_gpu_work():
     assert gpu_score < 0.242
 
 
-def _tree_depth(node, depth=0):
-    if "leaf_value" in node:
-        return depth
-    return max(
-        _tree_depth(node["left_child"], depth + 1),
-        _tree_depth(node["right_child"], depth + 1),
-    )
-
-
-def _train_pair(params_overrides, X, y):
-    out = {}
-    for device_type in ("cpu", "cuda"):
-        params = {
-            "verbose": -1,
-            "deterministic": True,
-            "num_threads": 1,
-            "seed": 0,
-            "feature_pre_filter": False,
-            "device_type": device_type,
-            "gpu_use_dp": True,
-            "force_col_wise": True,
-            **params_overrides,
-        }
-        ds = lgb.Dataset(X, label=y, params={"verbose": -1, "feature_pre_filter": False})
-        out[device_type] = lgb.train(params, ds, num_boost_round=1)
-    return out
-
-
-@_REQUIRES_CUDA
-@pytest.mark.parametrize(
-    ("max_depth", "num_leaves"),
-    [
-        (1, 2),
-        (1, 7),
-        (2, 4),
-        (2, 7),
-        (2, 31),
-        (3, 7),
-        (3, 31),
-        (5, 31),
-    ],
+_REQUIRES_CUDA = pytest.mark.skipif(
+    os.environ.get("TASK", "") != "cuda",
+    reason="requires CUDA-enabled LightGBM build (set TASK=cuda)",
 )
-def test_cuda_respects_max_depth(max_depth, num_leaves):
-    """CUDA tree learner must enforce max_depth, matching CPU.
-
-    Regression test for the bug where CUDABestSplitFinder had no max_depth
-    check and CUDATree::Split never updated host-side leaf_depth_, causing
-    CUDA to produce trees up to log2(num_leaves) deep regardless of
-    max_depth. With max_depth=2 and num_leaves=31, CUDA was producing
-    depth-7 trees with all 31 leaves filled.
-    """
-    rng = np.random.default_rng(0)
-    n = 64
-    X = rng.standard_normal((n, 4)).astype(np.float64)
-    y = (X @ rng.standard_normal(4) + 0.1 * rng.standard_normal(n)).astype(np.float64)
-
-    models = _train_pair(
-        {"max_depth": max_depth, "num_leaves": num_leaves, "min_data_in_leaf": 1},
-        X,
-        y,
-    )
-
-    cpu_dump = models["cpu"].dump_model()["tree_info"][0]
-    cuda_dump = models["cuda"].dump_model()["tree_info"][0]
-
-    cpu_depth = _tree_depth(cpu_dump["tree_structure"])
-    cuda_depth = _tree_depth(cuda_dump["tree_structure"])
-
-    assert cuda_depth <= max_depth, (
-        f"CUDA exceeded max_depth={max_depth}: produced depth-{cuda_depth} tree with num_leaves={num_leaves}"
-    )
-    assert cpu_depth == cuda_depth, (
-        f"CPU/CUDA depth mismatch with max_depth={max_depth}, num_leaves={num_leaves}: "
-        f"cpu={cpu_depth}, cuda={cuda_depth}"
-    )
-
 
 # Loose enough to absorb label_t float32 quantization in the renewal kernel,
 # tight enough to flag the ~0.3 bias the old PercentileDevice formula produced.
@@ -314,6 +242,83 @@ def test_cuda_l1_median_handles_small_even_and_odd_leaves(n):
                 f"{device_type} n={n} leaf {li} (size {int(mask.sum())}): "
                 f"expected np.median={expected:.10f}, got {actual:.10f}"
             )
+
+
+def _tree_depth(node, depth=0):
+    if "leaf_value" in node:
+        return depth
+    return max(
+        _tree_depth(node["left_child"], depth + 1),
+        _tree_depth(node["right_child"], depth + 1),
+    )
+
+
+def _train_pair(params_overrides, X, y):
+    out = {}
+    for device_type in ("cpu", "cuda"):
+        params = {
+            "verbose": -1,
+            "deterministic": True,
+            "num_threads": 1,
+            "seed": 0,
+            "feature_pre_filter": False,
+            "device_type": device_type,
+            "gpu_use_dp": True,
+            "force_col_wise": True,
+            **params_overrides,
+        }
+        ds = lgb.Dataset(X, label=y, params={"verbose": -1, "feature_pre_filter": False})
+        out[device_type] = lgb.train(params, ds, num_boost_round=1)
+    return out
+
+
+@_REQUIRES_CUDA
+@pytest.mark.parametrize(
+    ("max_depth", "num_leaves"),
+    [
+        (1, 2),
+        (1, 7),
+        (2, 4),
+        (2, 7),
+        (2, 31),
+        (3, 7),
+        (3, 31),
+        (5, 31),
+    ],
+)
+def test_cuda_respects_max_depth(max_depth, num_leaves):
+    """CUDA tree learner must enforce max_depth, matching CPU.
+
+    Regression test for the bug where CUDABestSplitFinder had no max_depth
+    check and CUDATree::Split never updated host-side leaf_depth_, causing
+    CUDA to produce trees up to log2(num_leaves) deep regardless of
+    max_depth. With max_depth=2 and num_leaves=31, CUDA was producing
+    depth-7 trees with all 31 leaves filled.
+    """
+    rng = np.random.default_rng(0)
+    n = 64
+    X = rng.standard_normal((n, 4)).astype(np.float64)
+    y = (X @ rng.standard_normal(4) + 0.1 * rng.standard_normal(n)).astype(np.float64)
+
+    models = _train_pair(
+        {"max_depth": max_depth, "num_leaves": num_leaves, "min_data_in_leaf": 1},
+        X,
+        y,
+    )
+
+    cpu_dump = models["cpu"].dump_model()["tree_info"][0]
+    cuda_dump = models["cuda"].dump_model()["tree_info"][0]
+
+    cpu_depth = _tree_depth(cpu_dump["tree_structure"])
+    cuda_depth = _tree_depth(cuda_dump["tree_structure"])
+
+    assert cuda_depth <= max_depth, (
+        f"CUDA exceeded max_depth={max_depth}: produced depth-{cuda_depth} tree with num_leaves={num_leaves}"
+    )
+    assert cpu_depth == cuda_depth, (
+        f"CPU/CUDA depth mismatch with max_depth={max_depth}, num_leaves={num_leaves}: "
+        f"cpu={cpu_depth}, cuda={cuda_depth}"
+    )
 
 
 def _train_monotone(device_type, constraints, num_boost_round, seed=0):

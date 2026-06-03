@@ -1,0 +1,10 @@
+/mnt/c/Users/maxwb/Development/LightGBM/.claude/worktrees/optim/build_cuda/CMakeFiles/lightgbm_objs.dir
+/mnt/c/Users/maxwb/Development/LightGBM/.claude/worktrees/optim/build_cuda/CMakeFiles/lightgbm.dir
+/mnt/c/Users/maxwb/Development/LightGBM/.claude/worktrees/optim/build_cuda/CMakeFiles/lightgbm_capi_objs.dir
+/mnt/c/Users/maxwb/Development/LightGBM/.claude/worktrees/optim/build_cuda/CMakeFiles/_lightgbm.dir
+/mnt/c/Users/maxwb/Development/LightGBM/.claude/worktrees/optim/build_cuda/CMakeFiles/edit_cache.dir
+/mnt/c/Users/maxwb/Development/LightGBM/.claude/worktrees/optim/build_cuda/CMakeFiles/rebuild_cache.dir
+/mnt/c/Users/maxwb/Development/LightGBM/.claude/worktrees/optim/build_cuda/CMakeFiles/list_install_components.dir
+/mnt/c/Users/maxwb/Development/LightGBM/.claude/worktrees/optim/build_cuda/CMakeFiles/install.dir
+/mnt/c/Users/maxwb/Development/LightGBM/.claude/worktrees/optim/build_cuda/CMakeFiles/install/local.dir
+/mnt/c/Users/maxwb/Development/LightGBM/.claude/worktrees/optim/build_cuda/CMakeFiles/install/strip.dir

@@ -78,11 +78,23 @@ class CUDARowData {
 
   int shared_hist_size() const { return shared_hist_size_; }
 
+  // Host-side accessors for the CompactView path in CUDAHistogramConstructor.
+  const std::vector<int>& host_feature_partition_column_index_offsets() const { return feature_partition_column_index_offsets_; }
+  const std::vector<uint32_t>& host_column_hist_offsets() const { return column_hist_offsets_; }
+  const std::vector<uint32_t>& host_partition_hist_offsets() const { return partition_hist_offsets_; }
+  data_size_t num_data() const { return num_data_; }
+  bool is_data_host_mapped() const { return cuda_data_is_host_mapped_; }
+  const uint8_t* host_partitioned_data_uint8_t() const { return host_partitioned_data_uint8_t_.data(); }
+
  private:
   void DivideCUDAFeatureGroups(const Dataset* train_data, TrainingShareStates* share_state);
 
   template <typename BIN_TYPE>
   void GetDenseDataPartitioned(const BIN_TYPE* row_wise_data, std::vector<BIN_TYPE>* partitioned_data);
+
+  // In-place version: writes into a pre-sized buffer (e.g. a host-pinned vector).
+  template <typename BIN_TYPE>
+  void GetDenseDataPartitionedToBuffer(const BIN_TYPE* row_wise_data, BIN_TYPE* out_data);
 
   template <typename BIN_TYPE, typename ROW_PTR_TYPE>
   void GetSparseDataPartitioned(const BIN_TYPE* row_wise_data,
@@ -140,6 +152,13 @@ class CUDARowData {
   int shared_hist_size_;
   /*! \brief whether to use double precision in histograms per block */
   bool gpu_use_dp_;
+  /*! \brief When true, cuda_data_uint8_t_ is a host-pinned, device-mapped pointer
+   *  (allocated via cudaHostRegister, freed via cudaHostUnregister). This is the
+   *  "host-mapped" zero-copy fallback used when the bin matrix is too large to
+   *  fit on the GPU alongside CUDAColumnData. */
+  bool cuda_data_is_host_mapped_ = false;
+  /*! \brief Backing storage for the host-pinned bin matrix when host-mapping is used. */
+  std::vector<uint8_t> host_partitioned_data_uint8_t_;
 
   // CUDA memory
 
