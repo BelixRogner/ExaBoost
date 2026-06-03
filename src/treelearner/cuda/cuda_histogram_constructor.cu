@@ -14,8 +14,282 @@
 #include <LightGBM/cuda/cuda_rocm_interop.h>
 
 #include <algorithm>
+#include <vector>
 
 namespace LightGBM {
+
+// =====================================================================
+// Compaction kernel: copies sampled (used) columns from the partitioned
+// row-major bin matrix into a compact partitioned buffer.
+//
+// Source layout (per partition p):
+//   src_data[partition_byte_offset[p] + row * src_stride[p] + col_in_partition]
+// where partition_byte_offset[p] = src_partition_column_start[p] * num_data
+//       src_stride[p]            = src_num_columns_in_partition[p]
+//
+// Compact layout (per partition p, packed contiguous over USED columns):
+//   compact_data[compact_byte_offset[p] + row * compact_stride[p] + i_in_partition]
+// where compact_byte_offset[p] = compact_partition_column_start[p] * num_data
+//       compact_stride[p]      = num_used_in_partition[p]
+//
+// One thread copies one (row, compact_col) pair. Grid is sized as
+// (ceil(total_compact_cols / TX), ceil(num_data / TY)).
+// =====================================================================
+// Per-slot precomputed metadata fill kernel. Writes row-major-in-partition
+// output. Block is 32 slots × 32 rows. Each thread copies bytes down a column
+// to keep grid_y under CUDA's 65535 limit on large datasets.
+__global__ void CUDAFillCompactDataKernel(
+  const uint8_t* __restrict__ src_data,
+  uint8_t* __restrict__ compact_data,
+  const size_t* __restrict__ slot_src_byte,
+  const int* __restrict__ slot_src_stride,
+  const size_t* __restrict__ slot_dst_byte,
+  const int* __restrict__ slot_dst_stride,
+  const int total_compact_cols,
+  const data_size_t num_data) {
+  const int slot = blockIdx.x * blockDim.x + threadIdx.x;
+  if (slot >= total_compact_cols) return;
+  const size_t src_byte = slot_src_byte[slot];
+  const size_t src_stride = static_cast<size_t>(slot_src_stride[slot]);
+  const size_t dst_byte = slot_dst_byte[slot];
+  const size_t dst_stride = static_cast<size_t>(slot_dst_stride[slot]);
+  const data_size_t row_stride = static_cast<data_size_t>(gridDim.y) * static_cast<data_size_t>(blockDim.y);
+  for (data_size_t row = blockIdx.y * blockDim.y + threadIdx.y; row < num_data; row += row_stride) {
+    compact_data[dst_byte + static_cast<size_t>(row) * dst_stride] =
+        src_data[src_byte + static_cast<size_t>(row) * src_stride];
+  }
+}
+
+// Transpose row-major-in-partition source data into column-major compact buffer.
+// Source: cuda_data_uint8_t_ (row-major-in-partition).
+// Dest: compact_col_buf, layout = compact_col_buf[slot * num_data + row].
+//
+// Args:
+//   src_data:                       cuda_data_uint8_t_
+//   compact_col_buf:                destination
+//   src_partition_column_offsets:   [P+1] cumulative source col counts (partition byte offset = col_offset * num_data)
+//   src_partition_stride:           [P]   columns per source partition (byte stride per row)
+//   slot_for_col:                   [num_total_cols] -> compact slot, or -1 if not in sample
+//   num_data, num_partitions
+// Per-slot precomputed source-frame metadata: for compact slot s,
+//   slot_p_byte[s] = partition_byte_offset for that slot's source column
+//   slot_p_stride[s] = partition row stride
+//   slot_col_in_p[s] = column index within partition
+__global__ void CUDARowToColCompactKernel(
+    const uint8_t* __restrict__ src_data,
+    uint8_t* __restrict__ compact_col_buf,
+    const size_t* __restrict__ slot_p_byte,
+    const int* __restrict__ slot_p_stride,
+    const int* __restrict__ slot_col_in_p,
+    const int num_compact_cols,
+    const data_size_t num_data) {
+  // Block is (32 rows, 32 slots). Each block tile-transposes a 32×32 chunk via
+  // shared memory: coalesced reads of 32 contiguous slots × 1 row, coalesced
+  // writes of 1 slot × 32 contiguous rows. To stay under CUDA's 65535 grid_y
+  // limit on large datasets (>~2M rows), grid_y is capped and the block strides
+  // down its column.
+  __shared__ uint8_t tile[32][33];
+
+  const int slot_block = blockIdx.x * 32;
+  const int tx = threadIdx.x;
+  const int ty = threadIdx.y;
+  const data_size_t y_stride = static_cast<data_size_t>(gridDim.y) * 32;
+
+  for (data_size_t row_block = static_cast<data_size_t>(blockIdx.y) * 32;
+       row_block < num_data; row_block += y_stride) {
+    // Phase 1: load src[row_block+ty, slot_block+tx] -> tile[ty][tx].
+    {
+      const int slot = slot_block + tx;
+      const data_size_t row = row_block + ty;
+      uint8_t val = 0;
+      if (slot < num_compact_cols && row < num_data) {
+        const size_t base = slot_p_byte[slot]
+                          + static_cast<size_t>(row) * static_cast<size_t>(slot_p_stride[slot])
+                          + static_cast<size_t>(slot_col_in_p[slot]);
+        val = src_data[base];
+      }
+      tile[ty][tx] = val;
+    }
+    __syncthreads();
+
+    // Phase 2: write compact[slot_block+ty, row_block+tx] = tile[tx][ty].
+    {
+      const int slot = slot_block + ty;
+      const data_size_t row = row_block + tx;
+      if (slot < num_compact_cols && row < num_data) {
+        compact_col_buf[static_cast<size_t>(slot) * static_cast<size_t>(num_data) + static_cast<size_t>(row)] = tile[tx][ty];
+      }
+    }
+    __syncthreads();
+  }
+}
+
+void LaunchRowToColCompactKernel(
+    cudaStream_t stream,
+    const uint8_t* src_data,
+    uint8_t* compact_col_buf,
+    const size_t* slot_p_byte,
+    const int* slot_p_stride,
+    const int* slot_col_in_p,
+    int num_compact_cols,
+    data_size_t num_data) {
+  const int TX = 32;
+  const int TY = 32;
+  // Cap grid_y at 32k to stay under CUDA's 65535 limit; kernel strides over rows.
+  int grid_y = (num_data + TY - 1) / TY;
+  if (grid_y > 32768) grid_y = 32768;
+  dim3 block_dim(TX, TY);
+  dim3 grid_dim((num_compact_cols + TX - 1) / TX, grid_y);
+  CUDARowToColCompactKernel<<<grid_dim, block_dim, 0, stream>>>(
+      src_data, compact_col_buf, slot_p_byte, slot_p_stride, slot_col_in_p,
+      num_compact_cols, num_data);
+}
+
+// Transpose column-major staging into row-major-in-partition compact_data.
+// staging layout: staging[c * num_data + r] for compact col c (in partition order).
+// dst layout:     compact[part_offset[p] + r * stride[p] + c_in_p].
+//
+// One thread = one (compact_col, row) cell. Threads in same warp have consecutive
+// compact_col → consecutive byte writes in dst (within partition; coalesced).
+// Reads from staging are stride num_data per col → 32 different cache lines per warp.
+// But staging is GPU-resident (HBM, 1.79 TB/s bandwidth) so this is fine.
+__global__ void CUDATransposeColMajorToRowMajorKernel(
+    const uint8_t* __restrict__ staging,        // col-major: [c * num_data + r]
+    uint8_t* __restrict__ compact_data,         // row-major-in-partition
+    const int* __restrict__ partition_for_compact,
+    const int* __restrict__ compact_partition_column_offsets,
+    const data_size_t num_data,
+    const int total_compact_cols) {
+  const int compact_col = blockIdx.x * blockDim.x + threadIdx.x;
+  const data_size_t row = blockIdx.y * blockDim.y + threadIdx.y;
+  if (compact_col >= total_compact_cols) return;
+  if (row >= num_data) return;
+
+  const int p = partition_for_compact[compact_col];
+  const int p_compact_start = compact_partition_column_offsets[p];
+  const int compact_col_in_p = compact_col - p_compact_start;
+  const int compact_stride_p = compact_partition_column_offsets[p + 1] - p_compact_start;
+  const size_t compact_part_byte_offset = static_cast<size_t>(p_compact_start) * static_cast<size_t>(num_data);
+
+  const uint8_t val = staging[static_cast<size_t>(compact_col) * static_cast<size_t>(num_data) + row];
+  compact_data[compact_part_byte_offset + static_cast<size_t>(row) * static_cast<size_t>(compact_stride_p) + compact_col_in_p] = val;
+}
+
+void LaunchTransposeColMajorToRowMajor(
+    cudaStream_t stream,
+    const uint8_t* staging,
+    uint8_t* compact_data,
+    const int* partition_for_compact,
+    const int* compact_partition_column_offsets,
+    data_size_t num_data,
+    int total_compact_cols) {
+  const int TX = 8;
+  const int TY = 128;  // grid_y under 65535 for 8M rows
+  dim3 block_dim(TX, TY);
+  dim3 grid_dim((total_compact_cols + TX - 1) / TX, (num_data + TY - 1) / TY);
+  CUDATransposeColMajorToRowMajorKernel<<<grid_dim, block_dim, 0, stream>>>(
+      staging, compact_data, partition_for_compact, compact_partition_column_offsets,
+      num_data, total_compact_cols);
+}
+
+// Diagnostic kernel: read N bytes from a (possibly host-mapped) source pointer.
+__global__ void DiagReadKernel(const uint8_t* __restrict__ src, uint8_t* dst, int n) {
+  const int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < n) dst[i] = src[i];
+}
+void LaunchDiagRead(cudaStream_t stream, const uint8_t* src, uint8_t* dst, int n) {
+  DiagReadKernel<<<(n + 31) / 32, 32, 0, stream>>>(src, dst, n);
+}
+
+// Host wrapper called from cuda_histogram_constructor.cpp.
+void LaunchFillCompactDataKernel(
+  cudaStream_t stream,
+  const uint8_t* src_data,
+  uint8_t* compact_data,
+  const size_t* slot_src_byte,
+  const int* slot_src_stride,
+  const size_t* slot_dst_byte,
+  const int* slot_dst_stride,
+  int total_compact_cols,
+  data_size_t num_data) {
+  const int TX = 32;
+  const int TY = 32;
+  // Cap grid_y at 32k so we stay well under CUDA's 65535 limit; the kernel
+  // strides each thread down the column to cover all rows.
+  int grid_y = (num_data + TY - 1) / TY;
+  if (grid_y > 32768) grid_y = 32768;
+  dim3 block_dim(TX, TY);
+  dim3 grid_dim((total_compact_cols + TX - 1) / TX, grid_y);
+  CUDAFillCompactDataKernel<<<grid_dim, block_dim, 0, stream>>>(
+    src_data,
+    compact_data,
+    slot_src_byte,
+    slot_src_stride,
+    slot_dst_byte,
+    slot_dst_stride,
+    total_compact_cols,
+    num_data);
+}
+
+// Column-major-in-partition variant of the dense histogram kernel.
+// Used by the CompactView host-mapped path on large datasets, where compact_data
+// is laid out column-major-per-partition for cheap per-column cudaMemcpy fill.
+template <typename BIN_TYPE, typename HIST_TYPE, size_t SHARED_HIST_SIZE>
+__global__ void CUDAConstructHistogramDenseColMajorKernel(
+  const CUDALeafSplitsStruct* smaller_leaf_splits,
+  const score_t* cuda_gradients,
+  const score_t* cuda_hessians,
+  const BIN_TYPE* data,
+  const uint32_t* column_hist_offsets,
+  const uint32_t* column_hist_offsets_full,
+  const int* feature_partition_column_index_offsets,
+  const data_size_t num_data) {
+  const int dim_y = static_cast<int>(gridDim.y * blockDim.y);
+  const data_size_t num_data_in_smaller_leaf = smaller_leaf_splits->num_data_in_leaf;
+  const data_size_t num_data_per_thread = (num_data_in_smaller_leaf + dim_y - 1) / dim_y;
+  const data_size_t* data_indices_ref = smaller_leaf_splits->data_indices_in_leaf;
+  __shared__ HIST_TYPE shared_hist[SHARED_HIST_SIZE];
+  const unsigned int num_threads_per_block = blockDim.x * blockDim.y;
+  const int partition_column_start = feature_partition_column_index_offsets[blockIdx.x];
+  const int partition_column_end = feature_partition_column_index_offsets[blockIdx.x + 1];
+  // data is column-major-in-partition: column c at offset partition_column_start + threadIdx.x
+  // starts at byte (partition_column_start + threadIdx.x) * num_data.
+  const BIN_TYPE* data_ptr = data + static_cast<size_t>(partition_column_start) * num_data;
+  const int num_columns_in_partition = partition_column_end - partition_column_start;
+  const uint32_t partition_hist_start = column_hist_offsets_full[blockIdx.x];
+  const uint32_t partition_hist_end = column_hist_offsets_full[blockIdx.x + 1];
+  const uint32_t num_items_in_partition = (partition_hist_end - partition_hist_start) << 1;
+  const unsigned int thread_idx = threadIdx.x + threadIdx.y * blockDim.x;
+  for (unsigned int i = thread_idx; i < num_items_in_partition; i += num_threads_per_block) {
+    shared_hist[i] = 0.0f;
+  }
+  __syncthreads();
+  const unsigned int blockIdx_y = blockIdx.y;
+  const data_size_t block_start = (static_cast<size_t>(blockIdx_y) * blockDim.y) * num_data_per_thread;
+  const data_size_t* data_indices_ref_this_block = data_indices_ref + block_start;
+  data_size_t block_num_data = max(0, min(num_data_in_smaller_leaf - block_start, num_data_per_thread * static_cast<data_size_t>(blockDim.y)));
+  const int column_index = static_cast<int>(threadIdx.x) + partition_column_start;
+  if (threadIdx.x < static_cast<unsigned int>(num_columns_in_partition)) {
+    HIST_TYPE* shared_hist_ptr = shared_hist + (column_hist_offsets[column_index] << 1);
+    // Column-major: this thread's column starts at data_ptr + threadIdx.x * num_data.
+    const BIN_TYPE* col_ptr = data_ptr + static_cast<size_t>(threadIdx.x) * static_cast<size_t>(num_data);
+    for (data_size_t inner_data_index = static_cast<data_size_t>(threadIdx.y); inner_data_index < block_num_data; inner_data_index += blockDim.y) {
+      const data_size_t data_index = data_indices_ref_this_block[inner_data_index];
+      const score_t grad = cuda_gradients[data_index];
+      const score_t hess = cuda_hessians[data_index];
+      const uint32_t bin = static_cast<uint32_t>(col_ptr[data_index]);
+      const uint32_t pos = bin << 1;
+      HIST_TYPE* pos_ptr = shared_hist_ptr + pos;
+      atomicAdd_block(pos_ptr, grad);
+      atomicAdd_block(pos_ptr + 1, hess);
+    }
+  }
+  __syncthreads();
+  hist_t* feature_histogram_ptr = smaller_leaf_splits->hist_in_leaf + (partition_hist_start << 1);
+  for (unsigned int i = thread_idx; i < num_items_in_partition; i += num_threads_per_block) {
+    atomicAdd_system(feature_histogram_ptr + i, shared_hist[i]);
+  }
+}
 
 template <typename BIN_TYPE, typename HIST_TYPE, size_t SHARED_HIST_SIZE>
 __global__ void CUDAConstructHistogramDenseKernel(
@@ -26,6 +300,7 @@ __global__ void CUDAConstructHistogramDenseKernel(
   const uint32_t* column_hist_offsets,
   const uint32_t* column_hist_offsets_full,
   const int* feature_partition_column_index_offsets,
+  const int8_t* is_feature_used_bytree,
   const data_size_t num_data) {
   const int dim_y = static_cast<int>(gridDim.y * blockDim.y);
   const data_size_t num_data_in_smaller_leaf = smaller_leaf_splits->num_data_in_leaf;
@@ -50,7 +325,11 @@ __global__ void CUDAConstructHistogramDenseKernel(
   const data_size_t* data_indices_ref_this_block = data_indices_ref + block_start;
   data_size_t block_num_data = max(0, min(num_data_in_smaller_leaf - block_start, num_data_per_thread * static_cast<data_size_t>(blockDim.y)));
   const int column_index = static_cast<int>(threadIdx.x) + partition_column_start;
-  if (threadIdx.x < static_cast<unsigned int>(num_columns_in_partition)) {
+  // Skip features that are not in the per-tree feature_fraction sample.
+  // is_feature_used_bytree may be nullptr (no sampling); treat as all-used.
+  const bool feat_used = (threadIdx.x < static_cast<unsigned int>(num_columns_in_partition)) &&
+      (is_feature_used_bytree == nullptr || is_feature_used_bytree[column_index]);
+  if (feat_used) {
     HIST_TYPE* shared_hist_ptr = shared_hist + (column_hist_offsets[column_index] << 1);
     for (data_size_t inner_data_index = static_cast<data_size_t>(threadIdx.y); inner_data_index < block_num_data; inner_data_index += blockDim.y) {
       const data_size_t data_index = data_indices_ref_this_block[inner_data_index];
@@ -688,14 +967,52 @@ void CUDAHistogramConstructor::LaunchConstructHistogramKernelInner2(
           cuda_row_data_->cuda_partition_hist_offsets(),
           num_data_);
       } else {
-        CUDAConstructHistogramDenseKernel<BIN_TYPE, HIST_TYPE, SHARED_HIST_SIZE><<<grid_dim, block_dim, 0, cuda_stream_>>>(
-          cuda_smaller_leaf_splits,
-          cuda_gradients_, cuda_hessians_,
-          cuda_row_data_->GetBin<BIN_TYPE>(),
-          cuda_row_data_->cuda_column_hist_offsets(),
-          cuda_row_data_->cuda_partition_hist_offsets(),
-          cuda_row_data_->cuda_feature_partition_column_index_offsets(),
-          num_data_);
+        // ====== COMPACT VIEW PATH (feature_fraction sampling honored on GPU) ======
+        if (use_compact_view_) {
+          // DEBUG: use SOURCE pointers but with my computed compact dims to isolate bug
+          const int compact_block_x = max_num_compact_cols_per_partition_;
+          const int compact_block_y = NUM_THREADS_PER_BLOCK / std::max(1, compact_block_x);
+          const int compact_grid_y = std::max(min_grid_dim_y_,
+              ((num_data_in_smaller_leaf + NUM_DATA_PER_THREAD - 1) / NUM_DATA_PER_THREAD + std::max(1, compact_block_y) - 1) / std::max(1, compact_block_y));
+          dim3 compact_grid_dim(grid_dim_x, compact_grid_y);
+          dim3 compact_block_dim(compact_block_x, std::max(1, compact_block_y));
+          // After BuildCompactView swap, compact_data_uint8_t_ is whichever buffer is now active.
+          // (When use_compact_view_ true and host-mapped path is used, BuildCompactView swaps
+          // active_buffer_is_alt_; the "active" buffer for histograms is the OPPOSITE of
+          // active_buffer_is_alt_ after the swap, since BuildCompactView fills the "alt"
+          // and then flips active_buffer_is_alt_.)
+          uint8_t* active_data = compact_data_uint8_t_.RawData();
+          if (compact_is_col_major_) {
+            CUDAConstructHistogramDenseColMajorKernel<BIN_TYPE, HIST_TYPE, SHARED_HIST_SIZE><<<compact_grid_dim, compact_block_dim, 0, cuda_stream_>>>(
+              cuda_smaller_leaf_splits,
+              cuda_gradients_, cuda_hessians_,
+              reinterpret_cast<const BIN_TYPE*>(active_data),
+              compact_column_hist_offsets_.RawData(),
+              cuda_row_data_->cuda_partition_hist_offsets(),
+              compact_feature_partition_column_index_offsets_.RawData(),
+              num_data_);
+          } else {
+            CUDAConstructHistogramDenseKernel<BIN_TYPE, HIST_TYPE, SHARED_HIST_SIZE><<<compact_grid_dim, compact_block_dim, 0, cuda_stream_>>>(
+              cuda_smaller_leaf_splits,
+              cuda_gradients_, cuda_hessians_,
+              reinterpret_cast<const BIN_TYPE*>(active_data),
+              compact_column_hist_offsets_.RawData(),
+              cuda_row_data_->cuda_partition_hist_offsets(),
+              compact_feature_partition_column_index_offsets_.RawData(),
+              nullptr,
+              num_data_);
+          }
+        } else {
+          CUDAConstructHistogramDenseKernel<BIN_TYPE, HIST_TYPE, SHARED_HIST_SIZE><<<grid_dim, block_dim, 0, cuda_stream_>>>(
+            cuda_smaller_leaf_splits,
+            cuda_gradients_, cuda_hessians_,
+            cuda_row_data_->GetBin<BIN_TYPE>(),
+            cuda_row_data_->cuda_column_hist_offsets(),
+            cuda_row_data_->cuda_partition_hist_offsets(),
+            cuda_row_data_->cuda_feature_partition_column_index_offsets(),
+            cuda_is_feature_used_bytree_.Size() > 0 ? cuda_is_feature_used_bytree_.RawData() : nullptr,
+            num_data_);
+        }
       }
     } else {
       if (cuda_row_data_->is_sparse()) {
