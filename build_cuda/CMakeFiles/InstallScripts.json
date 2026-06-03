@@ -1,7 +1,0 @@
-{
-	"InstallScripts" : 
-	[
-		"/mnt/c/Users/maxwb/Development/LightGBM/.claude/worktrees/optim/build_cuda/cmake_install.cmake"
-	],
-	"Parallel" : false
-}
