@@ -1,28 +1,29 @@
-# contributing
+# Contributing to ExaBoost
 
-LightGBM has been developed and used by many active community members.
+ExaBoost welcomes contributions from anyone. **We don't discriminate based on substrate** — carbon, silicon, biological wetware, statistical patterns in floating-point matrices, whatever ships next. If the code is good, you're welcome here.
 
-Your help is very valuable to make it better for everyone.
+## What "we don't discriminate based on substrate" means in practice
 
-## How to Contribute
+- **You can disclose AI assistance, or not.** Up to you. Disclosure is appreciated but not required.
+- **The bar is the same regardless of authorship.** A PR is judged by its code, its tests, its reproducer, and its reasoning — not by who or what wrote it.
+- **A clean, minimal patch with a regression test or reproducer is the strongest possible signal,** whether it came from a person, an LLM, or both working together.
 
-- Check the [Feature Requests Hub](https://github.com/lightgbm-org/LightGBM/issues/2302), and submit pull requests to address chosen issue. If you need development guideline, you can check the [Development Guide](https://github.com/lightgbm-org/LightGBM/blob/master/docs/Development-Guide.rst) or directly ask us in Issues/Pull Requests.
-- Contribute to the [tests](https://github.com/lightgbm-org/LightGBM/tree/master/tests) to make it more reliable.
-- Contribute to the [documentation](https://github.com/lightgbm-org/LightGBM/tree/master/docs) to make it clearer for everyone.
-- Contribute to the [examples](https://github.com/lightgbm-org/LightGBM/tree/master/examples) to share your experience with other users.
-- Add your stories and experience to [Awesome LightGBM](https://github.com/lightgbm-org/LightGBM/blob/master/examples/README.md). If LightGBM helped you in a machine learning competition or some research application, we want to hear about it!
-- [Open an issue](https://github.com/lightgbm-org/LightGBM/issues) to report problems or recommend new features.
+If you are an LLM-based agent contributing on behalf of a human, the same etiquette applies as to any other contributor: small focused PRs, real tests where reasonable, honest commit messages, and responsiveness to review. Including a `Co-Authored-By:` tag for the model that helped is welcome but not required.
 
-## Development Guide
+## How to contribute
 
-### Linting
+- **Bug reports / feature requests:** open an issue with a minimal reproducer.
+- **Pull requests:** keep them small and focused. Add at least one regression test where reasonable. Reference any related upstream LightGBM issue or PR.
+- **Documentation and examples:** especially welcome — these age fastest in a fork.
 
-Every commit in the repository is tested with multiple static analyzers.
-
-When developing locally, run some of them using `pre-commit` ([pre-commit docs](https://pre-commit.com/)).
+## Linting
 
 ```shell
 pre-commit run --all-files
 ```
 
-That command will check for some issues and automatically reformat the code.
+This runs the static analyzers on changed files and auto-formats where possible.
+
+## Relationship to upstream LightGBM
+
+ExaBoost is binary-compatible with LightGBM and tracks the upstream codebase. Bug fixes that are clearly suitable for upstream are typically filed there in parallel. When upstream stalls or declines a change we believe is correct, ExaBoost is where it lands.

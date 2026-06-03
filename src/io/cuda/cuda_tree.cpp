@@ -35,7 +35,11 @@ CUDATree::CUDATree(const Tree* host_tree):
 }
 
 CUDATree::~CUDATree() {
-  gpuAssert(cudaStreamDestroy(cuda_stream_), __FILE__, __LINE__);
+  // CUDAVector members handle their own deallocation. ToHost() may have
+  // already destroyed the stream — guard against double-destroy.
+  if (cuda_stream_ != nullptr) {
+    gpuAssert(cudaStreamDestroy(cuda_stream_), __FILE__, __LINE__);
+  }
 }
 
 void CUDATree::InitCUDAMemory() {
@@ -199,7 +203,60 @@ void CUDATree::ToHost() {
     cat_threshold_inner_ = cuda_bitset_inner_.ToHost();
   }
 
+  // Shrink host vectors to actual size before they're kept long-term in the
+  // Booster's model list. With max_leaves_=8192 but actual num_leaves_~125 on
+  // Numerai prod, this drops per-tree CPU memory from ~650 KB to ~10 KB.
+  if (num_leaves_ > 0 && num_leaves_ < max_leaves_) {
+    const size_t n_internal = static_cast<size_t>(num_leaves_) - 1;
+    const size_t n_leaves = static_cast<size_t>(num_leaves_);
+    left_child_.resize(n_internal); left_child_.shrink_to_fit();
+    right_child_.resize(n_internal); right_child_.shrink_to_fit();
+    split_feature_inner_.resize(n_internal); split_feature_inner_.shrink_to_fit();
+    split_feature_.resize(n_internal); split_feature_.shrink_to_fit();
+    threshold_in_bin_.resize(n_internal); threshold_in_bin_.shrink_to_fit();
+    threshold_.resize(n_internal); threshold_.shrink_to_fit();
+    decision_type_.resize(n_internal); decision_type_.shrink_to_fit();
+    split_gain_.resize(n_internal); split_gain_.shrink_to_fit();
+    leaf_parent_.resize(n_internal); leaf_parent_.shrink_to_fit();
+    internal_value_.resize(n_internal); internal_value_.shrink_to_fit();
+    internal_weight_.resize(n_internal); internal_weight_.shrink_to_fit();
+    internal_count_.resize(n_internal); internal_count_.shrink_to_fit();
+    leaf_value_.resize(n_leaves); leaf_value_.shrink_to_fit();
+    leaf_weight_.resize(n_leaves); leaf_weight_.shrink_to_fit();
+    leaf_count_.resize(n_leaves); leaf_count_.shrink_to_fit();
+    leaf_depth_.resize(n_leaves); leaf_depth_.shrink_to_fit();
+  }
+
   SynchronizeCUDADevice(__FILE__, __LINE__);
+
+  // Free per-tree GPU buffers no longer needed after ToHost. Without this,
+  // accumulated per-tree GPU memory OOMs a 32GB device after ~6k trees on
+  // the Numerai prod config. cuda_leaf_value_ is the only field needed
+  // post-train (AddPredictionToScore reads it); shrink to actual num_leaves_.
+  if (num_leaves_ > 0 && num_leaves_ < max_leaves_ && cuda_leaf_value_.Size() > 0) {
+    cuda_leaf_value_.Resize(static_cast<size_t>(num_leaves_));
+  }
+  cuda_left_child_.Clear();
+  cuda_right_child_.Clear();
+  cuda_split_feature_inner_.Clear();
+  cuda_split_feature_.Clear();
+  cuda_leaf_depth_.Clear();
+  cuda_leaf_parent_.Clear();
+  cuda_threshold_in_bin_.Clear();
+  cuda_threshold_.Clear();
+  cuda_internal_weight_.Clear();
+  cuda_internal_value_.Clear();
+  cuda_decision_type_.Clear();
+  cuda_leaf_count_.Clear();
+  cuda_leaf_weight_.Clear();
+  cuda_internal_count_.Clear();
+  cuda_split_gain_.Clear();
+
+  // Destroy the per-tree CUDA stream — only used during construction.
+  if (cuda_stream_ != nullptr) {
+    gpuAssert(cudaStreamDestroy(cuda_stream_), __FILE__, __LINE__);
+    cuda_stream_ = nullptr;
+  }
 }
 
 void CUDATree::SyncLeafOutputFromHostToCUDA() {
@@ -212,8 +269,17 @@ void CUDATree::SyncLeafOutputFromCUDAToHost() {
 
 void CUDATree::AsConstantTree(double val, int count) {
   Tree::AsConstantTree(val, count);
+  // After ToHost, cuda_leaf_value_ may have been Resize()d to a smaller size
+  // and cuda_leaf_count_ Clear()ed. GBDT calls AsConstantTree on 1-leaf trees,
+  // so realloc cuda_leaf_value_ at size 1 if needed and skip the count write
+  // when its storage was freed.
+  if (cuda_leaf_value_.Size() == 0) {
+    cuda_leaf_value_.Resize(1);
+  }
   CopyFromHostToCUDADevice<double>(cuda_leaf_value_.RawData(), &val, 1, __FILE__, __LINE__);
-  CopyFromHostToCUDADevice<int>(cuda_leaf_count_.RawData(), &count, 1, __FILE__, __LINE__);
+  if (cuda_leaf_count_.Size() > 0) {
+    CopyFromHostToCUDADevice<int>(cuda_leaf_count_.RawData(), &count, 1, __FILE__, __LINE__);
+  }
 }
 
 }  // namespace LightGBM

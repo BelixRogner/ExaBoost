@@ -251,6 +251,10 @@ class Booster {
         new_config.data_random_seed != old_config.data_random_seed) {
       Log::Fatal("Cannot change data_random_seed after constructed Dataset handle.");
     }
+    if ((new_param.count("device_type") || new_param.count("device")) &&
+        new_config.device_type != old_config.device_type) {
+      Log::Fatal("Cannot change device_type after constructed Dataset handle.");
+    }
     if (new_param.count("max_bin") &&
         new_config.max_bin != old_config.max_bin) {
       Log::Fatal("Cannot change max_bin after constructed Dataset handle.");
@@ -1647,8 +1651,8 @@ int LGBM_DatasetCreateFromCSC(const void* col_ptr,
 
 #ifndef LGB_R_BUILD
 int LGBM_DatasetCreateFromArrow(int64_t n_chunks,
-                                const struct ArrowArray* chunks,
-                                const struct ArrowSchema* schema,
+                                ArrowArray* chunks,
+                                ArrowSchema* schema,
                                 const char* parameters,
                                 const DatasetHandle reference,
                                 DatasetHandle *out) {
@@ -1864,8 +1868,8 @@ int LGBM_DatasetSetField(DatasetHandle handle,
 int LGBM_DatasetSetFieldFromArrow(DatasetHandle handle,
                                   const char* field_name,
                                   int64_t n_chunks,
-                                  const struct ArrowArray* chunks,
-                                  const struct ArrowSchema* schema) {
+                                  ArrowArray* chunks,
+                                  ArrowSchema* schema) {
   API_BEGIN();
   auto dataset = reinterpret_cast<Dataset*>(handle);
   ArrowChunkedArray ca(n_chunks, chunks, schema);
@@ -2625,8 +2629,8 @@ int LGBM_BoosterPredictForMats(BoosterHandle handle,
 #ifndef LGB_R_BUILD
 int LGBM_BoosterPredictForArrow(BoosterHandle handle,
                                 int64_t n_chunks,
-                                const struct ArrowArray* chunks,
-                                const struct ArrowSchema* schema,
+                                ArrowArray* chunks,
+                                ArrowSchema* schema,
                                 int predict_type,
                                 int start_iteration,
                                 int num_iteration,
