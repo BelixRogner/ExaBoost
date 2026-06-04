@@ -77,6 +77,16 @@ class CUDASingleGPUTreeLearner: public SerialTreeLearner, public NCCLInfo {
 
   void SelectFeatureByNode(const Tree* tree);
 
+  // Apply a split (device CUDASplitInfo + host-known feature/threshold) to the tree
+  // and the data partition. Shared by the main loop and the forced-split pre-pass.
+  // Returns the new (right) leaf index.
+  int ApplySplit(CUDATree* tree, const CUDASplitInfo* best_split_info, const int leaf_index);
+
+  // Apply forcedsplits_filename before the main split loop, mirroring
+  // SerialTreeLearner::ForceSplits (numerical features, single-GPU, non-quantized).
+  // Returns the number of forced splits applied.
+  int ForceSplitsCUDA(CUDATree* tree, int* num_splits_done);
+
   #ifdef DEBUG
   void CheckSplitValid(
     const int left_leaf, const int right_leaf);
