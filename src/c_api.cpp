@@ -252,8 +252,14 @@ class Booster {
       Log::Fatal("Cannot change data_random_seed after constructed Dataset handle.");
     }
     if ((new_param.count("device_type") || new_param.count("device")) &&
-        new_config.device_type != old_config.device_type) {
-      Log::Fatal("Cannot change device_type after constructed Dataset handle.");
+        new_config.device_type != old_config.device_type &&
+        (new_config.device_type == std::string("cuda") ||
+         old_config.device_type == std::string("cuda"))) {
+      // CUDA needs device-specific metadata baked in at construction; switching
+      // a Dataset to/from cuda after the fact leaves cuda_metadata_ unset and
+      // SIGSEGVs. cpu<->gpu (OpenCL) reuse is safe and supported upstream
+      // (see test_dual.py::test_cpu_and_gpu_work), so only guard the cuda case.
+      Log::Fatal("Cannot change device_type to/from cuda after constructed Dataset handle.");
     }
     if (new_param.count("max_bin") &&
         new_config.max_bin != old_config.max_bin) {
