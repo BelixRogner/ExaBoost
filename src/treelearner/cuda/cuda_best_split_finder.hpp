@@ -39,6 +39,8 @@ struct SplitFindTask {
   uint32_t num_bin;
   uint32_t default_bin;
   int rand_threshold;
+  // per-feature split-gain scaling (config->feature_contri); 1.0 when unset
+  double penalty;
 };
 
 class CUDABestSplitFinder {
@@ -57,6 +59,12 @@ class CUDABestSplitFinder {
   void Init();
 
   void InitCUDAFeatureMetaInfo();
+
+  // host-side penalty (feature_contri) for the given inner feature index
+  double GetFeaturePenalty(int inner_feature_index) const;
+
+  // recompute every task's penalty from feature_contri_ (host side)
+  void SetTaskFeaturePenalties();
 
   void BeforeTrain(const std::vector<int8_t>& is_feature_used_bytree);
 
@@ -214,6 +222,10 @@ class CUDABestSplitFinder {
   std::vector<int8_t> is_categorical_;
   // whether need to select features by node
   bool select_features_by_node_;
+  // inner feature index -> real feature index (feature_contri is indexed by real index)
+  std::vector<int> real_feature_index_;
+  // copy of config->feature_contri (indexed by real feature index); empty means all 1.0
+  std::vector<double> feature_contri_;
 
   // CUDA memory, held by this object
   // for per leaf best split information

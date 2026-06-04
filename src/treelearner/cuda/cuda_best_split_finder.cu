@@ -272,7 +272,7 @@ __device__ void FindBestSplitsForLeafKernelInner(
   if (threshold_found && threadIdx_x == best_thread_index) {
     cuda_best_split_info->is_valid = true;
     cuda_best_split_info->threshold = threshold_value;
-    cuda_best_split_info->gain = local_gain;
+    cuda_best_split_info->gain = local_gain * task->penalty;
     cuda_best_split_info->default_left = task->assume_out_default_left;
     if (REVERSE) {
       const double sum_right_gradient = local_grad_hist;
@@ -470,7 +470,7 @@ __device__ void FindBestSplitsDiscretizedForLeafKernelInner(
   if (threshold_found && threadIdx_x == best_thread_index) {
     cuda_best_split_info->is_valid = true;
     cuda_best_split_info->threshold = threshold_value;
-    cuda_best_split_info->gain = local_gain;
+    cuda_best_split_info->gain = local_gain * task->penalty;
     cuda_best_split_info->default_left = task->assume_out_default_left;
     const double left_output = CUDALeafSplits::CalculateSplittedLeafOutput<USE_L1, USE_SMOOTHING>(sum_left_gradient,
       sum_left_hessian, lambda_l1, lambda_l2, path_smooth, left_count, parent_output);
@@ -579,7 +579,7 @@ __device__ void FindBestSplitsForLeafKernelCategoricalInner(
     if (threshold_found && threadIdx_x == best_thread_index) {
       cuda_best_split_info->is_valid = true;
       cuda_best_split_info->num_cat_threshold = 1;
-      cuda_best_split_info->gain = local_gain - min_gain_shift;
+      cuda_best_split_info->gain = (local_gain - min_gain_shift) * task->penalty;
       *(cuda_best_split_info->cat_threshold) = static_cast<uint32_t>(threadIdx_x + task->mfb_offset);
       cuda_best_split_info->default_left = false;
       const int bin_offset = (threadIdx_x << 1);
@@ -737,7 +737,7 @@ __device__ void FindBestSplitsForLeafKernelCategoricalInner(
     if (threshold_found && threadIdx_x == best_thread_index) {
       cuda_best_split_info->is_valid = true;
       cuda_best_split_info->num_cat_threshold = threadIdx_x + 1;
-      cuda_best_split_info->gain = local_gain - min_gain_shift;
+      cuda_best_split_info->gain = (local_gain - min_gain_shift) * task->penalty;
       if (best_dir == 1) {
         for (int i = 0; i < threadIdx_x + 1; ++i) {
           (cuda_best_split_info->cat_threshold)[i] = shared_index_buffer[i] + task->mfb_offset;
@@ -1231,7 +1231,7 @@ __device__ void FindBestSplitsForLeafKernelInner_GlobalMemory(
   if (threshold_found && threadIdx_x == best_thread_index) {
     cuda_best_split_info->is_valid = true;
     cuda_best_split_info->threshold = threshold_value;
-    cuda_best_split_info->gain = local_gain;
+    cuda_best_split_info->gain = local_gain * task->penalty;
     cuda_best_split_info->default_left = task->assume_out_default_left;
     if (REVERSE) {
       const unsigned int best_bin = static_cast<uint32_t>(task->num_bin - 2 - threshold_value);
@@ -1535,7 +1535,7 @@ __device__ void FindBestSplitsForLeafKernelCategoricalInner_GlobalMemory(
       cuda_best_split_info->is_valid = true;
       cuda_best_split_info->num_cat_threshold = best_threshold + 1;
       cuda_best_split_info->cat_threshold = new uint32_t[best_threshold + 1];
-      cuda_best_split_info->gain = local_gain;
+      cuda_best_split_info->gain = local_gain * task->penalty;
       if (best_dir == 1) {
         for (int i = 0; i < best_threshold + 1; ++i) {
           (cuda_best_split_info->cat_threshold)[i] = hist_index_buffer_ptr[i] + task->mfb_offset;

@@ -319,3 +319,80 @@ def test_cuda_respects_max_depth(max_depth, num_leaves):
         f"CPU/CUDA depth mismatch with max_depth={max_depth}, num_leaves={num_leaves}: "
         f"cpu={cpu_depth}, cuda={cuda_depth}"
     )
+
+
+@_REQUIRES_CUDA
+@pytest.mark.parametrize(
+    "feature_contri",
+    [
+        [1.0, 1.0, 1.0, 1.0],
+        [0.0, 1.0, 1.0, 1.0],
+        [1.0, 1.0, 1.0, 0.0],
+        [0.5, 1.0, 1.0, 1.0],
+        [0.5, 1.0, 2.0, 1.0],
+    ],
+)
+def test_cuda_feature_contri_matches_cpu(feature_contri):
+    """CUDA must apply per-feature gain scaling (feature_contri) identically to CPU.
+
+    Regression test for feature_contri being silently ignored on CUDA: the CPU
+    FeatureHistogram multiplies each feature's best-split gain by its
+    feature_contri entry (output->gain *= meta_->penalty) before cross-feature
+    comparison; the CUDA best-split finder had no equivalent, so a feature with
+    contri 0 was still selected for splits on CUDA.
+    """
+    rng = np.random.RandomState(0)
+    X = rng.rand(500, 4)
+    y = 5 * X[:, 0] + 2 * X[:, 1] + 1 * X[:, 2] + 0.5 * X[:, 3] + 0.1 * rng.rand(500)
+
+    boosters = {}
+    for device_type in ("cpu", "cuda"):
+        params = {
+            "objective": "regression",
+            "feature_contri": feature_contri,
+            "num_leaves": 15,
+            "min_data_in_leaf": 5,
+            "learning_rate": 0.1,
+            "verbose": -1,
+            "deterministic": True,
+            "num_threads": 1,
+            "seed": 0,
+            "gpu_use_dp": True,
+            "force_col_wise": True,
+            "feature_pre_filter": False,
+            "device_type": device_type,
+        }
+        ds = lgb.Dataset(X, label=y, params={"verbose": -1, "feature_pre_filter": False})
+        boosters[device_type] = lgb.train(params, ds, num_boost_round=5)
+
+    def used_features(bst):
+        used = set()
+
+        def _rec(node):
+            if "leaf_value" in node:
+                return
+            used.add(node["split_feature"])
+            _rec(node["left_child"])
+            _rec(node["right_child"])
+
+        for tree in bst.dump_model()["tree_info"]:
+            _rec(tree["tree_structure"])
+        return used
+
+    used_cpu = used_features(boosters["cpu"])
+    used_cuda = used_features(boosters["cuda"])
+
+    # same features selected (in particular, zero-contri features excluded on both)
+    assert used_cpu == used_cuda
+    for fidx, contri in enumerate(feature_contri):
+        if contri == 0.0:
+            assert fidx not in used_cuda
+
+    # predictions match at FP epsilon
+    np.testing.assert_allclose(
+        boosters["cpu"].predict(X),
+        boosters["cuda"].predict(X),
+        rtol=0,
+        atol=1e-10,
+        err_msg=f"feature_contri={feature_contri}: CUDA diverges from CPU",
+    )
