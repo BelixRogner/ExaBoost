@@ -319,3 +319,129 @@ def test_cuda_respects_max_depth(max_depth, num_leaves):
         f"CPU/CUDA depth mismatch with max_depth={max_depth}, num_leaves={num_leaves}: "
         f"cpu={cpu_depth}, cuda={cuda_depth}"
     )
+
+
+def _train_mds(device_type, objective, max_delta_step, learning_rate, num_boost_round, min_data_in_leaf):
+    rng = np.random.RandomState(0)
+    X = rng.rand(400, 6)
+    if objective == "binary":
+        y = (X[:, 0] + 0.4 * rng.rand(400) > 0.6).astype(int)
+    else:
+        y = 3 * X[:, 0] + 2 * X[:, 1] - X[:, 2] + 0.1 * rng.rand(400)
+    params = {
+        "objective": objective,
+        "max_delta_step": max_delta_step,
+        "num_leaves": 15,
+        "min_data_in_leaf": min_data_in_leaf,
+        "learning_rate": learning_rate,
+        "verbose": -1,
+        "deterministic": True,
+        "num_threads": 1,
+        "seed": 0,
+        "gpu_use_dp": True,
+        "force_col_wise": True,
+        "feature_pre_filter": False,
+        "device_type": device_type,
+    }
+    ds = lgb.Dataset(X, label=y, params={"verbose": -1, "feature_pre_filter": False})
+    return lgb.train(params, ds, num_boost_round=num_boost_round), X, y
+
+
+def _tree_leaf_values(bst, tree_index=0):
+    values = []
+
+    def _rec(node):
+        if "leaf_value" in node:
+            values.append(node["leaf_value"])
+        else:
+            _rec(node["left_child"])
+            _rec(node["right_child"])
+
+    _rec(bst.dump_model()["tree_info"][tree_index]["tree_structure"])
+    return values
+
+
+@_REQUIRES_CUDA
+@pytest.mark.parametrize("max_delta_step", [0.05, 0.1, 0.5])
+@pytest.mark.parametrize("objective", ["binary", "regression"])
+def test_cuda_max_delta_step_caps_outputs_like_cpu(objective, max_delta_step):
+    """The max_delta_step output cap must be enforced identically on CPU and CUDA.
+
+    Regression test for max_delta_step being silently ignored on CUDA: the cap
+    (the USE_MAX_OUTPUT branch of the CPU FeatureHistogram leaf-output formula)
+    was missing from the CUDA leaf-output device functions, so CUDA leaf values
+    were unbounded while CPU's were capped.
+
+    The cap limits each leaf's Newton step to [-max_delta_step, +max_delta_step],
+    so within one tree the leaf-value spread can be at most 2 * max_delta_step.
+    Before the fix, CUDA's spread exceeded this by an order of magnitude.
+    """
+    spreads = {}
+    for device_type in ("cpu", "cuda"):
+        bst, _, _ = _train_mds(
+            device_type, objective, max_delta_step, learning_rate=1.0, num_boost_round=1, min_data_in_leaf=1
+        )
+        values = _tree_leaf_values(bst)
+        spreads[device_type] = max(values) - min(values)
+        assert spreads[device_type] <= 2 * max_delta_step + 1e-9, (
+            f"{device_type}: leaf spread {spreads[device_type]} exceeds 2*max_delta_step={2 * max_delta_step}"
+        )
+    # both backends apply the same cap, so the spreads must match exactly
+    assert spreads["cuda"] == pytest.approx(spreads["cpu"], abs=1e-10)
+
+
+@_REQUIRES_CUDA
+@pytest.mark.parametrize("max_delta_step", [1.0, 2.0, 5.0])
+def test_cuda_max_delta_step_matches_cpu_exactly(max_delta_step):
+    """When the cap binds without saturating every leaf, CUDA must match CPU bit-for-bit.
+
+    Uses the regression objective where leaf outputs are moderate, so the cap
+    reduces some leaf values without collapsing all split gains to zero. In this
+    regime the trained models must be identical at FP epsilon. (When the cap
+    saturates every leaf, all split gains collapse to ~0 and ULP-level FP noise
+    decides among equally-optimal splits; that tie-breaking difference is tracked
+    separately and is not a max_delta_step issue.)
+    """
+    preds = {}
+    for device_type in ("cpu", "cuda"):
+        bst, X, _ = _train_mds(
+            device_type, "regression", max_delta_step, learning_rate=0.1, num_boost_round=10, min_data_in_leaf=5
+        )
+        preds[device_type] = bst.predict(X, raw_score=True)
+    np.testing.assert_allclose(
+        preds["cpu"],
+        preds["cuda"],
+        rtol=0,
+        atol=1e-10,
+        err_msg=f"max_delta_step={max_delta_step}: CUDA diverges from CPU",
+    )
+
+
+@_REQUIRES_CUDA
+@pytest.mark.parametrize("objective", ["binary", "regression"])
+def test_cuda_max_delta_step_loss_matches_cpu_when_saturated(objective):
+    """When the cap saturates leaves (creating gain plateaus), training quality must still match.
+
+    With a tiny max_delta_step every leaf clamps to +/-max_delta_step and all
+    split gains collapse to ~0; CPU and CUDA then pick different but equally
+    optimal splits (FP tie-breaking). The tree structures may differ, but the
+    cap must hold on both and the training loss must agree closely.
+    """
+    max_delta_step = 0.05
+    losses = {}
+    for device_type in ("cpu", "cuda"):
+        bst, X, y = _train_mds(
+            device_type, objective, max_delta_step, learning_rate=0.1, num_boost_round=10, min_data_in_leaf=5
+        )
+        # cap still enforced on every tree
+        for t in range(10):
+            values = _tree_leaf_values(bst, t)
+            assert max(values) - min(values) <= 2 * max_delta_step + 1e-9
+        pred = bst.predict(X)
+        if objective == "binary":
+            pred = np.clip(pred, 1e-12, 1 - 1e-12)
+            losses[device_type] = float(-np.mean(y * np.log(pred) + (1 - y) * np.log(1 - pred)))
+        else:
+            losses[device_type] = float(np.mean((y - pred) ** 2))
+    rel_diff = abs(losses["cpu"] - losses["cuda"]) / abs(losses["cpu"])
+    assert rel_diff < 0.02, f"training loss diverged: cpu={losses['cpu']} cuda={losses['cuda']}"

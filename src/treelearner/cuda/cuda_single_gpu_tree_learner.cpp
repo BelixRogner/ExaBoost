@@ -123,6 +123,7 @@ void CUDASingleGPUTreeLearner::BeforeTrain() {
     cuda_smaller_leaf_splits_->InitValues(
       config_->lambda_l1,
       config_->lambda_l2,
+      config_->max_delta_step,
       reinterpret_cast<const int16_t*>(cuda_gradient_discretizer_->discretized_gradients_and_hessians()),
       leaf_splits_init_indices,
       cuda_data_partition_->cuda_data_indices(),
@@ -141,6 +142,7 @@ void CUDASingleGPUTreeLearner::BeforeTrain() {
     cuda_smaller_leaf_splits_->InitValues(
       config_->lambda_l1,
       config_->lambda_l2,
+      config_->max_delta_step,
       gradients_,
       hessians_,
       leaf_splits_init_indices,
@@ -286,7 +288,7 @@ Tree* CUDASingleGPUTreeLearner::Train(const score_t* gradients,
   // set the root value by hand, as it is not handled by splits
   tree->SetLeafOutput(0, CUDALeafSplits::CalculateSplittedLeafOutput<true, false>(
     leaf_sum_gradients_[smaller_leaf_index_], leaf_sum_hessians_[smaller_leaf_index_],
-    config_->lambda_l1, config_->lambda_l2,  config_->path_smooth,
+    config_->lambda_l1, config_->lambda_l2,  config_->path_smooth, config_->max_delta_step,
     static_cast<data_size_t>(num_data_), 0));
   tree->SyncLeafOutputFromHostToCUDA();
   for (int i = 0; i < config_->num_leaves - 1; ++i) {
