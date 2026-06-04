@@ -44,6 +44,18 @@ CUDABestSplitFinder::CUDABestSplitFinder(
   if (has_categorical_feature_ && config->use_quantized_grad) {
     Log::Fatal("Quantized training on GPU with categorical features is not supported yet.");
   }
+  // Build a per-inner-feature monotone constraint vector. config->monotone_constraints
+  // is indexed by REAL feature index (see FeatureHistogram feature-meta init), so map
+  // each inner feature through RealFeatureIndex.
+  use_monotone_constraints_ = !config->monotone_constraints.empty();
+  monotone_constraints_.resize(num_features_, 0);
+  if (use_monotone_constraints_) {
+    for (int inner_feature_index = 0; inner_feature_index < num_features_; ++inner_feature_index) {
+      const int real_feature_index = train_data->RealFeatureIndex(inner_feature_index);
+      monotone_constraints_[inner_feature_index] =
+        config->monotone_constraints[real_feature_index];
+    }
+  }
 }
 
 CUDABestSplitFinder::~CUDABestSplitFinder() {
@@ -144,6 +156,8 @@ void CUDABestSplitFinder::InitCUDAFeatureMetaInfo() {
         new_task->mfb_offset = feature_mfb_offsets_[inner_feature_index];
         new_task->default_bin = feature_default_bins_[inner_feature_index];
         new_task->num_bin = num_bin;
+        new_task->monotone_type = use_monotone_constraints_ ?
+          monotone_constraints_[inner_feature_index] : 0;
         ++cur_task_index;
 
         new_task = &split_find_tasks_[cur_task_index];
@@ -159,6 +173,8 @@ void CUDABestSplitFinder::InitCUDAFeatureMetaInfo() {
         new_task->default_bin = feature_default_bins_[inner_feature_index];
         new_task->mfb_offset = feature_mfb_offsets_[inner_feature_index];
         new_task->num_bin = num_bin;
+        new_task->monotone_type = use_monotone_constraints_ ?
+          monotone_constraints_[inner_feature_index] : 0;
         ++cur_task_index;
       } else {
         SplitFindTask* new_task = &split_find_tasks_[cur_task_index];
@@ -174,6 +190,8 @@ void CUDABestSplitFinder::InitCUDAFeatureMetaInfo() {
         new_task->mfb_offset = feature_mfb_offsets_[inner_feature_index];
         new_task->default_bin = feature_default_bins_[inner_feature_index];
         new_task->num_bin = num_bin;
+        new_task->monotone_type = use_monotone_constraints_ ?
+          monotone_constraints_[inner_feature_index] : 0;
         ++cur_task_index;
 
         new_task = &split_find_tasks_[cur_task_index];
@@ -189,6 +207,8 @@ void CUDABestSplitFinder::InitCUDAFeatureMetaInfo() {
         new_task->mfb_offset = feature_mfb_offsets_[inner_feature_index];
         new_task->default_bin = feature_default_bins_[inner_feature_index];
         new_task->num_bin = num_bin;
+        new_task->monotone_type = use_monotone_constraints_ ?
+          monotone_constraints_[inner_feature_index] : 0;
         ++cur_task_index;
       }
     } else {
@@ -215,6 +235,10 @@ void CUDABestSplitFinder::InitCUDAFeatureMetaInfo() {
       new_task.mfb_offset = feature_mfb_offsets_[inner_feature_index];
       new_task.default_bin = feature_default_bins_[inner_feature_index];
       new_task.num_bin = num_bin;
+      // categorical features carry no monotone semantics (matching the CPU path,
+      // where monotone constraints only affect numerical splits)
+      new_task.monotone_type = (use_monotone_constraints_ && !new_task.is_categorical) ?
+        monotone_constraints_[inner_feature_index] : 0;
       ++cur_task_index;
     }
   }
@@ -316,7 +340,11 @@ void CUDABestSplitFinder::FindBestSplitsForLeaf(
   const uint8_t smaller_num_bits_in_histogram_bins,
   const uint8_t larger_num_bits_in_histogram_bins,
   const bool smaller_leaf_below_max_depth,
-  const bool larger_leaf_below_max_depth) {
+  const bool larger_leaf_below_max_depth,
+  const double smaller_leaf_constraint_min,
+  const double smaller_leaf_constraint_max,
+  const double larger_leaf_constraint_min,
+  const double larger_leaf_constraint_max) {
   const bool is_smaller_leaf_valid = (num_data_in_smaller_leaf > min_data_in_leaf_ &&
     sum_hessians_in_smaller_leaf > min_sum_hessian_in_leaf_ &&
     smaller_leaf_below_max_depth);
@@ -329,7 +357,8 @@ void CUDABestSplitFinder::FindBestSplitsForLeaf(
       grad_scale, hess_scale, smaller_num_bits_in_histogram_bins, larger_num_bits_in_histogram_bins, num_data_in_smaller_leaf, num_data_in_larger_leaf);
   } else {
     LaunchFindBestSplitsForLeafKernel(smaller_leaf_splits, larger_leaf_splits,
-      smaller_leaf_index, larger_leaf_index, is_smaller_leaf_valid, is_larger_leaf_valid, num_data_in_smaller_leaf, num_data_in_larger_leaf);
+      smaller_leaf_index, larger_leaf_index, is_smaller_leaf_valid, is_larger_leaf_valid, num_data_in_smaller_leaf, num_data_in_larger_leaf,
+      smaller_leaf_constraint_min, smaller_leaf_constraint_max, larger_leaf_constraint_min, larger_leaf_constraint_max);
   }
   global_timer.Start("CUDABestSplitFinder::LaunchSyncBestSplitForLeafKernel");
   LaunchSyncBestSplitForLeafKernel(smaller_leaf_index, larger_leaf_index, is_smaller_leaf_valid, is_larger_leaf_valid);

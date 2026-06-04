@@ -7,6 +7,9 @@
 
 #ifdef USE_CUDA
 
+#include <algorithm>
+#include <limits>
+
 #include "cuda_single_gpu_tree_learner.hpp"
 
 #include <LightGBM/cuda/cuda_tree.hpp>
@@ -72,6 +75,19 @@ void CUDASingleGPUTreeLearner::Init(const Dataset* train_data, bool is_constant_
   leaf_data_start_.resize(config_->num_leaves, 0);
   leaf_sum_gradients_.resize(config_->num_leaves, 0.0f);
   leaf_sum_hessians_.resize(config_->num_leaves, 0.0f);
+
+  use_monotone_constraints_ = !config_->monotone_constraints.empty();
+  if (use_monotone_constraints_) {
+    leaf_constraint_min_.resize(config_->num_leaves, -std::numeric_limits<double>::max());
+    leaf_constraint_max_.resize(config_->num_leaves, std::numeric_limits<double>::max());
+    // config_->monotone_constraints is real-indexed; map to inner feature index.
+    monotone_constraints_.resize(train_data_->num_features(), 0);
+    for (int inner_feature_index = 0; inner_feature_index < train_data_->num_features(); ++inner_feature_index) {
+      const int real_feature_index = train_data_->RealFeatureIndex(inner_feature_index);
+      monotone_constraints_[inner_feature_index] =
+        config_->monotone_constraints[real_feature_index];
+    }
+  }
 
   if (!boosting_on_cuda_) {
     cuda_gradients_.Resize(static_cast<size_t>(num_data_));
@@ -161,6 +177,13 @@ void CUDASingleGPUTreeLearner::BeforeTrain() {
   leaf_data_start_[0] = 0;
   smaller_leaf_index_ = 0;
   larger_leaf_index_ = -1;
+
+  if (use_monotone_constraints_) {
+    std::fill(leaf_constraint_min_.begin(), leaf_constraint_min_.end(),
+              -std::numeric_limits<double>::max());
+    std::fill(leaf_constraint_max_.begin(), leaf_constraint_max_.end(),
+              std::numeric_limits<double>::max());
+  }
 
   if (nccl_communicator_ != nullptr) {
     leaf_to_hist_index_map_.resize(config_->num_leaves, -1);
@@ -383,8 +406,18 @@ Tree* CUDASingleGPUTreeLearner::Train(const score_t* gradients,
         larger_leaf_num_bits_bin,
         config_->max_depth <= 0 || tree->leaf_depth(smaller_leaf_index_) < config_->max_depth,
         larger_leaf_index_ < 0 || config_->max_depth <= 0 ||
-          tree->leaf_depth(larger_leaf_index_) < config_->max_depth);
+          tree->leaf_depth(larger_leaf_index_) < config_->max_depth,
+        -std::numeric_limits<double>::max(), std::numeric_limits<double>::max(),
+        -std::numeric_limits<double>::max(), std::numeric_limits<double>::max());
     } else {
+      const double smaller_leaf_constraint_min = use_monotone_constraints_ ?
+        leaf_constraint_min_[smaller_leaf_index_] : -std::numeric_limits<double>::max();
+      const double smaller_leaf_constraint_max = use_monotone_constraints_ ?
+        leaf_constraint_max_[smaller_leaf_index_] : std::numeric_limits<double>::max();
+      const double larger_leaf_constraint_min = (use_monotone_constraints_ && larger_leaf_index_ >= 0) ?
+        leaf_constraint_min_[larger_leaf_index_] : -std::numeric_limits<double>::max();
+      const double larger_leaf_constraint_max = (use_monotone_constraints_ && larger_leaf_index_ >= 0) ?
+        leaf_constraint_max_[larger_leaf_index_] : std::numeric_limits<double>::max();
       cuda_best_split_finder_->FindBestSplitsForLeaf(
         cuda_smaller_leaf_splits_->GetCUDAStruct(),
         cuda_larger_leaf_splits_->GetCUDAStruct(),
@@ -394,7 +427,9 @@ Tree* CUDASingleGPUTreeLearner::Train(const score_t* gradients,
         nullptr, nullptr, 0, 0,
         config_->max_depth <= 0 || tree->leaf_depth(smaller_leaf_index_) < config_->max_depth,
         larger_leaf_index_ < 0 || config_->max_depth <= 0 ||
-          tree->leaf_depth(larger_leaf_index_) < config_->max_depth);
+          tree->leaf_depth(larger_leaf_index_) < config_->max_depth,
+        smaller_leaf_constraint_min, smaller_leaf_constraint_max,
+        larger_leaf_constraint_min, larger_leaf_constraint_max);
     }
 
     global_timer.Stop("CUDASingleGPUTreeLearner::FindBestSplitsForLeaf");
@@ -489,6 +524,18 @@ Tree* CUDASingleGPUTreeLearner::Train(const score_t* gradients,
     CheckSplitValid(best_leaf_index_, right_leaf_index);
     #endif  // DEBUG
 
+    if (use_monotone_constraints_) {
+      const int split_inner_feature = leaf_best_split_feature_[best_leaf_index_];
+      const bool is_numerical_split =
+        train_data_->FeatureBinMapper(split_inner_feature)->bin_type() == BinType::NumericalBin;
+      double host_left_value = 0.0;
+      double host_right_value = 0.0;
+      CopyFromCUDADeviceToHost<double>(&host_left_value, &best_split_info->left_value, 1, __FILE__, __LINE__);
+      CopyFromCUDADeviceToHost<double>(&host_right_value, &best_split_info->right_value, 1, __FILE__, __LINE__);
+      UpdateLeafConstraints(best_leaf_index_, right_leaf_index, split_inner_feature,
+                            host_left_value, host_right_value, is_numerical_split);
+    }
+
     if (nccl_communicator_ != nullptr) {
       smaller_leaf_index_ = (global_num_data_in_leaf_[best_leaf_index_] < global_num_data_in_leaf_[right_leaf_index] ? best_leaf_index_ : right_leaf_index);
       larger_leaf_index_ = (smaller_leaf_index_ == best_leaf_index_ ? right_leaf_index : best_leaf_index_);
@@ -518,6 +565,34 @@ Tree* CUDASingleGPUTreeLearner::Train(const score_t* gradients,
   }
   tree->ToHost();
   return tree.release();
+}
+
+void CUDASingleGPUTreeLearner::UpdateLeafConstraints(
+  const int left_leaf, const int right_leaf, const int inner_feature_index,
+  const double left_value, const double right_value, const bool is_numerical_split) {
+  // Mirror of BasicLeafConstraints::Update (monotone_constraints.hpp). The new leaf
+  // inherits the parent's [min,max], then, for a numerical split on a monotone
+  // feature, the mid-point of the (clamped) child outputs becomes a min/max bound
+  // for the two children.
+  leaf_constraint_min_[right_leaf] = leaf_constraint_min_[left_leaf];
+  leaf_constraint_max_[right_leaf] = leaf_constraint_max_[left_leaf];
+  if (!is_numerical_split) {
+    return;
+  }
+  const int8_t monotone_type = monotone_constraints_[inner_feature_index];
+  if (monotone_type == 0) {
+    return;
+  }
+  const double mid = (left_value + right_value) / 2.0;
+  if (monotone_type < 0) {
+    // decreasing: left child (parent leaf) gets a min bound, right child a max bound
+    leaf_constraint_min_[left_leaf] = std::max(mid, leaf_constraint_min_[left_leaf]);
+    leaf_constraint_max_[right_leaf] = std::min(mid, leaf_constraint_max_[right_leaf]);
+  } else {
+    // increasing: left child gets a max bound, right child a min bound
+    leaf_constraint_max_[left_leaf] = std::min(mid, leaf_constraint_max_[left_leaf]);
+    leaf_constraint_min_[right_leaf] = std::max(mid, leaf_constraint_min_[right_leaf]);
+  }
 }
 
 void CUDASingleGPUTreeLearner::ResetTrainingData(

@@ -140,6 +140,60 @@ class CUDALeafSplits: public NCCLInfo {
                       l1, l2, path_smooth, right_count, parent_output);
   }
 
+  // Monotone-constraint-aware leaf output: analytic output clamped into the
+  // per-leaf [constraint_min, constraint_max] interval. Mirrors the CPU
+  // FeatureHistogram::CalculateSplittedLeafOutput<USE_MC, ...> clamp.
+  template <bool USE_L1, bool USE_SMOOTHING>
+  __device__ static double CalculateSplittedLeafOutputMC(double sum_gradients,
+                                          double sum_hessians, double l1, double l2,
+                                          double path_smooth, data_size_t num_data,
+                                          double parent_output,
+                                          double constraint_min, double constraint_max) {
+    double ret = CalculateSplittedLeafOutput<USE_L1, USE_SMOOTHING>(
+        sum_gradients, sum_hessians, l1, l2, path_smooth, num_data, parent_output);
+    if (ret < constraint_min) {
+      ret = constraint_min;
+    } else if (ret > constraint_max) {
+      ret = constraint_max;
+    }
+    return ret;
+  }
+
+  // Monotone-constraint-aware split gain. Mirrors the CPU
+  // FeatureHistogram::GetSplitGains<USE_MC=true, ...> branch:
+  //   * clamp both child outputs into the per-leaf [min,max]
+  //   * return 0 if the monotonicity relation between children is violated
+  //   * otherwise return GetLeafGainGivenOutput(left)+GetLeafGainGivenOutput(right)
+  // For a feature with monotone_constraint==0 and an unconstrained leaf
+  // ([-DBL_MAX, +DBL_MAX]) this is mathematically identical to the non-MC
+  // analytic gain, and is exactly what the CPU computes when
+  // monotone_constraints is non-empty (USE_MC is then on for every feature).
+  template <bool USE_L1, bool USE_SMOOTHING>
+  __device__ static double GetSplitGainsMC(double sum_left_gradients,
+                            double sum_left_hessians,
+                            double sum_right_gradients,
+                            double sum_right_hessians,
+                            double l1, double l2,
+                            double path_smooth,
+                            data_size_t left_count,
+                            data_size_t right_count,
+                            double parent_output,
+                            double constraint_min, double constraint_max,
+                            int8_t monotone_constraint) {
+    const double left_output = CalculateSplittedLeafOutputMC<USE_L1, USE_SMOOTHING>(
+        sum_left_gradients, sum_left_hessians, l1, l2, path_smooth, left_count,
+        parent_output, constraint_min, constraint_max);
+    const double right_output = CalculateSplittedLeafOutputMC<USE_L1, USE_SMOOTHING>(
+        sum_right_gradients, sum_right_hessians, l1, l2, path_smooth, right_count,
+        parent_output, constraint_min, constraint_max);
+    if (((monotone_constraint > 0) && (left_output > right_output)) ||
+        ((monotone_constraint < 0) && (left_output < right_output))) {
+      return 0;
+    }
+    return GetLeafGainGivenOutput<USE_L1>(sum_left_gradients, sum_left_hessians, l1, l2, left_output) +
+           GetLeafGainGivenOutput<USE_L1>(sum_right_gradients, sum_right_hessians, l1, l2, right_output);
+  }
+
  private:
   void LaunchInitValuesEmptyKernel();
 

@@ -461,6 +461,21 @@ void Config::CheckParamConflict(const std::unordered_map<std::string, std::strin
   if (max_depth > 0 && monotone_penalty >= max_depth) {
     Log::Warning("Monotone penalty greater than tree depth. Monotone features won't be used.");
   }
+  if (device_type == std::string("cuda") && !monotone_constraints.empty()) {
+    if (monotone_constraints_method != std::string("basic")) {
+      Log::Fatal("CUDA only supports the \"basic\" monotone_constraints_method. "
+                 "Got \"%s\". Use device_type=cpu for intermediate/advanced methods.",
+                 monotone_constraints_method.c_str());
+    }
+    if (monotone_penalty > 0.0) {
+      Log::Fatal("monotone_penalty is not supported with device_type=cuda. "
+                 "Set monotone_penalty=0 or use device_type=cpu.");
+    }
+    if (use_quantized_grad) {
+      Log::Fatal("monotone_constraints is not supported with use_quantized_grad on "
+                 "device_type=cuda. Disable one of them or use device_type=cpu.");
+    }
+  }
   if (min_data_in_leaf <= 0 && min_sum_hessian_in_leaf <= kEpsilon) {
     Log::Warning(
         "Cannot set both min_data_in_leaf and min_sum_hessian_in_leaf to 0. "
