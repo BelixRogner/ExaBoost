@@ -99,6 +99,25 @@ class CUDABestSplitFinder {
   void SetUsedFeatureByNode(const std::vector<int8_t>& is_feature_used_by_smaller_node,
                             const std::vector<int8_t>& is_feature_used_by_larger_node);
 
+  // Cost-effective gradient boosting (CEGB) support. Mirrors
+  // CostEfficientGradientBoosting on the CPU path. Called once per training
+  // session (after Init / ResetConfig) with the *real-feature-indexed*
+  // cegb_penalty_feature_coupled vector. tradeoff/penalty_split are the scalar
+  // config values. When all CEGB knobs are at their defaults this is a no-op.
+  void SetCEGB(const std::vector<double>& cegb_penalty_feature_coupled,
+               const double cegb_tradeoff,
+               const double cegb_penalty_split,
+               const Dataset* train_data);
+
+  // Called by the tree learner right after a split is committed, with the inner
+  // feature index that was used. If the coupled penalty is active and this is the
+  // first time the feature is used in the model, the per-task coupled penalty for
+  // all tasks of this feature is zeroed and the device copy is refreshed. Mirrors
+  // CostEfficientGradientBoosting::UpdateLeafBestSplits' is_feature_used_in_split_
+  // bookkeeping (the per-task split-finding penalty), but NOT the retroactive
+  // promotion of cached splits in already-existing leaves (see risk notes).
+  void MarkFeatureUsedInSplit(const int inner_feature_index);
+
  private:
   #define LaunchFindBestSplitsForLeafKernel_PARAMS \
     const CUDALeafSplitsStruct* smaller_leaf_splits, \
@@ -243,6 +262,26 @@ class CUDABestSplitFinder {
 
   // CUDA memory, held by other object
   const hist_t* cuda_hist_;
+
+  // ---- CEGB (cost-effective gradient boosting) state ----
+  // Whether any CEGB penalty (split or coupled) is active. cegb_tradeoff alone
+  // (with no split/coupled penalty) has no effect on split selection, so it does
+  // not by itself enable the penalty path.
+  bool cegb_use_ = false;
+  double cegb_tradeoff_ = 1.0;
+  // tradeoff * penalty_split, multiplied by num_data_in_leaf inside the kernel.
+  double cegb_tradeoff_times_penalty_split_ = 0.0;
+  // real_fidx for each split-find task (parallel to split_find_tasks_).
+  std::vector<int> cegb_task_real_fidx_;
+  // coupled penalty per *real* feature index (config value, size num_total_features).
+  std::vector<double> cegb_penalty_feature_coupled_;
+  // is_feature_used_in_split_[inner_feature_index] (parallel to CPU bitset).
+  std::vector<int8_t> cegb_is_feature_used_in_split_;
+  // host mirror of the per-task coupled penalty currently uploaded to device.
+  std::vector<double> cegb_host_task_penalty_;
+  // device per-task coupled penalty (length num_tasks_); nullptr-equivalent when
+  // cegb_use_ is false.
+  CUDAVector<double> cuda_task_cegb_penalty_;
 };
 
 }  // namespace LightGBM

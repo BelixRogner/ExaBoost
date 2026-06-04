@@ -64,6 +64,10 @@ void CUDASingleGPUTreeLearner::Init(const Dataset* train_data, bool is_constant_
   cuda_best_split_finder_.reset(new CUDABestSplitFinder(cuda_histogram_constructor_->cuda_hist(),
     train_data_, this->share_state_->feature_hist_offsets(), select_features_by_node_, config_));
   cuda_best_split_finder_->Init();
+  cuda_best_split_finder_->SetCEGB(config_->cegb_penalty_feature_coupled,
+                                   config_->cegb_tradeoff,
+                                   config_->cegb_penalty_split,
+                                   train_data_);
 
   leaf_best_split_feature_.resize(config_->num_leaves, -1);
   leaf_best_split_threshold_.resize(config_->num_leaves, 0);
@@ -457,6 +461,10 @@ Tree* CUDASingleGPUTreeLearner::Train(const score_t* gradients,
                                        train_data_->FeatureBinMapper(leaf_best_split_feature_[best_leaf_index_])->missing_type(),
                                        best_split_info);
     }
+
+    // CEGB: mark the chosen feature as used so its coupled penalty is dropped going forward.
+    cuda_best_split_finder_->MarkFeatureUsedInSplit(
+        leaf_best_split_feature_[best_leaf_index_]);
 
     // The right leaf is a freshly allocated hist slot that hasn't been zeroed.
     // Zero it now so the next iter's ConstructHistogramForLeaf can atomicAdd

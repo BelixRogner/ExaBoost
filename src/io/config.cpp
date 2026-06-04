@@ -421,6 +421,10 @@ void Config::CheckParamConflict(const std::unordered_map<std::string, std::strin
     if (deterministic) {
       Log::Warning("Although \"deterministic\" is set, the results ran by GPU may be non-deterministic.");
     }
+    if (!cegb_penalty_feature_lazy.empty()) {
+      Log::Fatal("cegb_penalty_feature_lazy is not supported with device_type=\"cuda\". "
+                 "Use device_type=\"cpu\", or use cegb_penalty_feature_coupled / cegb_penalty_split instead.");
+    }
   }
   // linear tree learner must be serial type and run on CPU device
   if (linear_tree) {
