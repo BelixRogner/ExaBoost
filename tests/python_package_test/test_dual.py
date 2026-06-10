@@ -3,6 +3,7 @@
 
 import contextlib
 import io
+import json
 import os
 import platform
 
@@ -389,3 +390,125 @@ def test_cuda_data_partition_block_offset_no_overflow(n, num_leaves):
 
     assert np.all(np.isfinite(preds["cuda"])), "CUDA produced non-finite predictions"
     np.testing.assert_allclose(preds["cuda"], preds["cpu"], atol=1e-10)
+
+
+def _train_forced(device_type, forced_split, tmp_path, num_boost_round=10, num_leaves=8, seed=0):
+    rng = np.random.RandomState(seed)
+    X = rng.rand(400, 6)
+    y = 3 * X[:, 0] + 2 * X[:, 1] - X[:, 2] + 0.1 * rng.rand(400)
+    fn = tmp_path / f"forced_{device_type}_{seed}.json"
+    fn.write_text(json.dumps(forced_split))
+    params = {
+        "objective": "regression",
+        "forcedsplits_filename": str(fn),
+        "num_leaves": num_leaves,
+        "min_data_in_leaf": 5,
+        "learning_rate": 0.1,
+        "verbose": -1,
+        "deterministic": True,
+        "num_threads": 1,
+        "seed": 0,
+        "gpu_use_dp": True,
+        "force_col_wise": True,
+        "feature_pre_filter": False,
+        "device_type": device_type,
+    }
+    ds = lgb.Dataset(X, label=y, params={"verbose": -1, "feature_pre_filter": False})
+    return lgb.train(params, ds, num_boost_round=num_boost_round), X, y
+
+
+_FORCED_SPLIT_CASES = {
+    "root_only": {"feature": 2, "threshold": 0.5},
+    "root_nested": {
+        "feature": 2,
+        "threshold": 0.5,
+        "left": {"feature": 2, "threshold": 0.25},
+        "right": {"feature": 2, "threshold": 0.75},
+    },
+    "root_lr_mixed": {
+        "feature": 1,
+        "threshold": 0.4,
+        "left": {"feature": 0, "threshold": 0.3},
+        "right": {"feature": 3, "threshold": 0.6},
+    },
+    "three_deep_chain": {
+        "feature": 2,
+        "threshold": 0.5,
+        "left": {"feature": 0, "threshold": 0.5, "left": {"feature": 1, "threshold": 0.5}},
+    },
+}
+
+
+def _forced_features_in_json(node, out=None):
+    if out is None:
+        out = []
+    if "feature" in node:
+        out.append(node["feature"])
+        for side in ("left", "right"):
+            if side in node:
+                _forced_features_in_json(node[side], out)
+    return out
+
+
+@_REQUIRES_CUDA
+@pytest.mark.parametrize("case", list(_FORCED_SPLIT_CASES))
+@pytest.mark.parametrize("num_leaves", [8, 31])
+def test_cuda_forced_splits_honored(case, num_leaves, tmp_path):
+    """CUDA must apply the forced-split JSON: the forced root feature heads every tree.
+
+    Regression test for forcedsplits_filename being silently ignored on CUDA
+    (ForceSplits only existed in SerialTreeLearner::Train; the CUDA learner never
+    consulted the forced-split JSON, so CUDA trees split on whatever feature had
+    the best gain instead of the forced one).
+    """
+    forced_split = _FORCED_SPLIT_CASES[case]
+    bst, _, _ = _train_forced("cuda", forced_split, tmp_path, num_leaves=num_leaves)
+    forced_root_feature = forced_split["feature"]
+    for tree in bst.dump_model()["tree_info"]:
+        root = tree["tree_structure"]
+        assert root["split_feature"] == forced_root_feature, (
+            f"tree does not honor forced root split: got feature {root['split_feature']}, "
+            f"expected {forced_root_feature}"
+        )
+
+
+@_REQUIRES_CUDA
+@pytest.mark.parametrize("case", list(_FORCED_SPLIT_CASES))
+@pytest.mark.parametrize("num_leaves", [8, 31])
+@pytest.mark.parametrize("seed", [0, 1])
+def test_cuda_forced_splits_match_cpu(case, num_leaves, seed, tmp_path):
+    """CUDA forced-split training must produce the same model as CPU.
+
+    Predictions must match at FP epsilon over 30 boosting rounds; the first tree's
+    structure (split features, gains, counts, leaf values) must match exactly.
+    """
+    forced_split = _FORCED_SPLIT_CASES[case]
+    bst_cpu, X, _ = _train_forced("cpu", forced_split, tmp_path, num_boost_round=30, num_leaves=num_leaves, seed=seed)
+    bst_cuda, _, _ = _train_forced("cuda", forced_split, tmp_path, num_boost_round=30, num_leaves=num_leaves, seed=seed)
+
+    # tree-0 structure equality (features, gains, counts, leaf values; thresholds may
+    # differ in real-value display encoding for the same bin boundary)
+    def substantive(bst):
+        out = []
+
+        def _rec(node):
+            if "leaf_value" in node:
+                out.append(("leaf", round(node["leaf_value"], 10), node["leaf_count"]))
+            else:
+                out.append((node["split_feature"], round(node["split_gain"], 6), node["internal_count"]))
+                _rec(node["left_child"])
+                _rec(node["right_child"])
+
+        _rec(bst.dump_model()["tree_info"][0]["tree_structure"])
+        return out
+
+    assert substantive(bst_cpu) == substantive(bst_cuda)
+
+    # prediction parity over all rounds
+    np.testing.assert_allclose(
+        bst_cpu.predict(X),
+        bst_cuda.predict(X),
+        rtol=0,
+        atol=1e-10,
+        err_msg=f"forced splits case={case}: CUDA diverges from CPU",
+    )

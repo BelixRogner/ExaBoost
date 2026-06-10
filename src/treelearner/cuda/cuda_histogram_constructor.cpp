@@ -137,10 +137,10 @@ bool CUDAHistogramConstructor::BuildCompactView(const std::vector<int8_t>& is_fe
 
   // Per-partition: compute used columns and their local idx within source partition.
   std::vector<int> compact_part_col_offsets;       // [P+1] cumulative compact cols
-  std::vector<int> src_part_stride_h;               // [P] src cols per partition
-  std::vector<int> src_local_col_for_compact_h;     // [total_compact_cols]
-  std::vector<int> partition_for_compact_h;         // [total_compact_cols]
-  std::vector<uint32_t> compact_col_hist_offsets_h; // [total_compact_cols] -- relative-to-partition hist offsets
+  std::vector<int> src_part_stride_h;                // [P] src cols per partition
+  std::vector<int> src_local_col_for_compact_h;      // [total_compact_cols]
+  std::vector<int> partition_for_compact_h;          // [total_compact_cols]
+  std::vector<uint32_t> compact_col_hist_offsets_h;  // [total_compact_cols] -- relative-to-partition hist offsets
 
   compact_part_col_offsets.push_back(0);
   int total_compact = 0;
