@@ -99,7 +99,48 @@ class CUDABestSplitFinder {
   void SetUsedFeatureByNode(const std::vector<int8_t>& is_feature_used_by_smaller_node,
                             const std::vector<int8_t>& is_feature_used_by_larger_node);
 
+  // ---- forced-split support (forcedsplits_filename) ----
+  // Compute split information for a FORCED split of the given leaf at the given
+  // (numerical) feature and bin threshold, mirroring the CPU
+  // FeatureHistogram::GatherInfoForThresholdNumerical. The result is written to the
+  // given leaf's slot of an internal device buffer (so it survives later searches);
+  // *out_host receives a host copy for gain/validity checks.
+  const CUDASplitInfo* ComputeForcedSplit(
+    const CUDALeafSplitsStruct* leaf_splits,
+    const int inner_feature_index,
+    const uint32_t threshold,
+    const data_size_t num_data_in_leaf,
+    const int leaf_slot,
+    CUDASplitInfo* out_host);
+
+  // Invalidate the cached per-leaf best-split entries of the given leaves (after a
+  // forced split is applied, the parent's cached entry describes the pre-split leaf).
+  void InvalidateLeafBestSplit(const int left_leaf_index, const int right_leaf_index);
+
+  // Copy the cached best-split (feature, threshold, default_left) of the given leaves
+  // from the device cache to the host arrays. The main loop's FindBestFromAllSplits
+  // does this implicitly; the forced-split pre-pass must do it explicitly after each
+  // search so the host arrays stay consistent with the device cache for every leaf.
+  void SyncLeafBestSplitToHost(
+    const int smaller_leaf_index,
+    const int larger_leaf_index,
+    int* smaller_leaf_best_split_feature,
+    uint32_t* smaller_leaf_best_split_threshold,
+    uint8_t* smaller_leaf_best_split_default_left,
+    int* larger_leaf_best_split_feature,
+    uint32_t* larger_leaf_best_split_threshold,
+    uint8_t* larger_leaf_best_split_default_left);
+
  private:
+  void LaunchComputeForcedSplitKernel(
+    const CUDALeafSplitsStruct* leaf_splits,
+    const SplitFindTask* device_task,
+    const uint32_t threshold,
+    const data_size_t num_data_in_leaf,
+    CUDASplitInfo* out);
+
+  void LaunchInvalidateLeafBestSplitKernel(const int left_leaf_index, const int right_leaf_index);
+
   #define LaunchFindBestSplitsForLeafKernel_PARAMS \
     const CUDALeafSplitsStruct* smaller_leaf_splits, \
     const CUDALeafSplitsStruct* larger_leaf_splits, \
@@ -224,6 +265,10 @@ class CUDABestSplitFinder {
   CUDAVector<int> cuda_best_split_info_buffer_;
   // find best split task information
   CUDAVector<SplitFindTask> cuda_split_find_tasks_;
+  // per-leaf device buffer for forced-split info
+  CUDAVector<CUDASplitInfo> cuda_forced_split_info_;
+  // maps inner feature index -> index of its first task in split_find_tasks_
+  std::vector<int> feature_to_task_index_;
   CUDAVector<int8_t> cuda_is_feature_used_bytree_;
   // used when finding best split with global memory
   CUDAVector<hist_t> cuda_feature_hist_grad_buffer_;

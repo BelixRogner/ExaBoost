@@ -236,6 +236,15 @@ void CUDABestSplitFinder::InitCUDAFeatureMetaInfo() {
                                           split_find_tasks_.size(),
                                           __FILE__,
                                           __LINE__);
+  // forced-split support: per-leaf output buffer + inner-feature -> task map
+  cuda_forced_split_info_.Resize(static_cast<size_t>(num_leaves_));
+  feature_to_task_index_.assign(num_features_, -1);
+  for (int task_index = 0; task_index < num_tasks_; ++task_index) {
+    const int inner_feature_index = split_find_tasks_[task_index].inner_feature_index;
+    if (feature_to_task_index_[inner_feature_index] < 0) {
+      feature_to_task_index_[inner_feature_index] = task_index;
+    }
+  }
 
   const size_t output_buffer_size = 2 * static_cast<size_t>(num_tasks_);
   cuda_best_split_info_.Resize(output_buffer_size);
@@ -367,6 +376,38 @@ const CUDASplitInfo* CUDABestSplitFinder::FindBestFromAllSplits(
 
 void CUDABestSplitFinder::AllocateCatVectors(CUDASplitInfo* cuda_split_infos, uint32_t* cat_threshold_vec, int* cat_threshold_real_vec, size_t len) {
   LaunchAllocateCatVectorsKernel(cuda_split_infos, cat_threshold_vec, cat_threshold_real_vec, len);
+}
+
+const CUDASplitInfo* CUDABestSplitFinder::ComputeForcedSplit(
+  const CUDALeafSplitsStruct* leaf_splits,
+  const int inner_feature_index,
+  const uint32_t threshold,
+  const data_size_t num_data_in_leaf,
+  const int leaf_slot,
+  CUDASplitInfo* out_host) {
+  if (inner_feature_index < 0 || inner_feature_index >= num_features_ ||
+      feature_to_task_index_[inner_feature_index] < 0 ||
+      is_categorical_[inner_feature_index] ||
+      leaf_slot < 0 || leaf_slot >= num_leaves_) {
+    out_host->is_valid = false;
+    out_host->gain = kMinScore;
+    return nullptr;
+  }
+  const int task_index = feature_to_task_index_[inner_feature_index];
+  CUDASplitInfo* device_slot = cuda_forced_split_info_.RawData() + leaf_slot;
+  LaunchComputeForcedSplitKernel(leaf_splits,
+                                 cuda_split_find_tasks_.RawDataReadOnly() + task_index,
+                                 threshold,
+                                 num_data_in_leaf,
+                                 device_slot);
+  SynchronizeCUDADevice(__FILE__, __LINE__);
+  CopyFromCUDADeviceToHost<CUDASplitInfo>(out_host, device_slot, 1, __FILE__, __LINE__);
+  return device_slot;
+}
+
+void CUDABestSplitFinder::InvalidateLeafBestSplit(const int left_leaf_index, const int right_leaf_index) {
+  LaunchInvalidateLeafBestSplitKernel(left_leaf_index, right_leaf_index);
+  SynchronizeCUDADevice(__FILE__, __LINE__);
 }
 
 void CUDABestSplitFinder::SetUsedFeatureByNode(const std::vector<int8_t>& is_feature_used_by_smaller_node,
