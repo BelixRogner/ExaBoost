@@ -976,9 +976,13 @@ __global__ void FindBestSplitsDiscretizedForLeafKernel(
             // output parameters
             out);
         } else {
-          const int32_t* hist_ptr =
-            reinterpret_cast<const int32_t*>(IS_LARGER ? larger_leaf_splits->hist_in_leaf : smaller_leaf_splits->hist_in_leaf) + task->hist_offset;
-          FindBestSplitsDiscretizedForLeafKernelInner<USE_RAND, USE_L1, USE_SMOOTHING, false, int32_t, int64_t, false, false>(
+          // 32-bit histogram: each bin is an int64 (grad32 << 32 | hess32), written by
+          // the construct kernel via int64 atomics. It must be read as int64 (offset in
+          // bin units). Reading it as int32 read 4-byte half-bins at the wrong stride and
+          // produced garbage splits whenever a leaf needed 32-bit bins (large leaves).
+          const int64_t* hist_ptr =
+            reinterpret_cast<const int64_t*>(IS_LARGER ? larger_leaf_splits->hist_in_leaf : smaller_leaf_splits->hist_in_leaf) + task->hist_offset;
+          FindBestSplitsDiscretizedForLeafKernelInner<USE_RAND, USE_L1, USE_SMOOTHING, false, int64_t, int64_t, false, false>(
             // input feature information
             hist_ptr,
             // input task information
@@ -1030,9 +1034,10 @@ __global__ void FindBestSplitsDiscretizedForLeafKernel(
             // output parameters
             out);
         } else {
-          const int32_t* hist_ptr =
-            reinterpret_cast<const int32_t*>(IS_LARGER ? larger_leaf_splits->hist_in_leaf : smaller_leaf_splits->hist_in_leaf) + task->hist_offset;
-          FindBestSplitsDiscretizedForLeafKernelInner<USE_RAND, USE_L1, USE_SMOOTHING, true, int32_t, int64_t, false, false>(
+          // 32-bit histogram is int64-per-bin; read as int64 (see forward branch above).
+          const int64_t* hist_ptr =
+            reinterpret_cast<const int64_t*>(IS_LARGER ? larger_leaf_splits->hist_in_leaf : smaller_leaf_splits->hist_in_leaf) + task->hist_offset;
+          FindBestSplitsDiscretizedForLeafKernelInner<USE_RAND, USE_L1, USE_SMOOTHING, true, int64_t, int64_t, false, false>(
             // input feature information
             hist_ptr,
             // input task information
