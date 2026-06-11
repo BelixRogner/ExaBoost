@@ -479,6 +479,54 @@ def test_cuda_quantized_deep_trees_track_cpu(n, seed):
     assert max_diff < 5.0, f"CUDA quantized deep trees diverge from CPU by {max_diff:.3g} (n={n}, seed={seed})"
 
 
+@_REQUIRES_CUDA
+@pytest.mark.parametrize("n", [2000, 8000, 50000])
+def test_cuda_quantized_32bit_histogram_matches_cpu(n):
+    """CUDA quantized training must match CPU once leaves need 32-bit histograms.
+
+    Regression test for the best-split finder reading the 32-bit discretized
+    histogram with the wrong width. A leaf whose max per-bin stat
+    (num_data_in_leaf * num_grad_quant_bins) reaches 65536 uses an int64-per-bin
+    (32-bit grad / 32-bit hess) histogram. The finder dispatched that case with
+    BIN_HIST_TYPE=int32_t and read it through an int32_t* offset, i.e. 4-byte
+    half-bins at the wrong stride, so the split search saw garbage for any leaf
+    large enough to need 32-bit bins. With num_grad_quant_bins=16 that is any leaf
+    with >= 4096 rows; the resulting models were near-random (correlation ~0 with
+    CPU). The 8-bit and 16-bit paths were correct, so small-data tests never hit it.
+
+    With num_grad_quant_bins=16: n=2000 stays 16-bit (already correct), while
+    n>=8000 forces a 32-bit root. The fix reads the histogram as int64, making CUDA
+    bit-identical to CPU at all scales.
+    """
+    rng = np.random.default_rng(0)
+    nf = 40
+    X = rng.standard_normal((n, nf)).astype(np.float64)
+    y = (X @ rng.standard_normal(nf) + 0.3 * rng.standard_normal(n)).astype(np.float64)
+    preds = {}
+    for device_type in ("cpu", "cuda"):
+        params = {
+            "objective": "regression",
+            "num_leaves": 31,
+            "min_data_in_leaf": 20,
+            "learning_rate": 0.05,
+            "use_quantized_grad": True,
+            "num_grad_quant_bins": 16,
+            "verbose": -1,
+            "deterministic": True,
+            "num_threads": 1,
+            "seed": 0,
+            "gpu_use_dp": True,
+            "force_col_wise": True,
+            "feature_pre_filter": False,
+            "device_type": device_type,
+        }
+        ds = lgb.Dataset(X, label=y, params={"verbose": -1, "feature_pre_filter": False})
+        preds[device_type] = lgb.train(params, ds, num_boost_round=20).predict(X)
+    corr = float(np.corrcoef(preds["cpu"], preds["cuda"])[0, 1])
+    # Before the fix, 32-bit-histogram leaves (n>=8000) gave correlation ~0.
+    assert corr > 0.99, f"CUDA quantized (32-bit histogram) diverges from CPU: corr={corr:.4f} (n={n})"
+
+
 def _train_forced(device_type, forced_split, tmp_path, num_boost_round=10, num_leaves=8, seed=0):
     rng = np.random.RandomState(seed)
     X = rng.rand(400, 6)
