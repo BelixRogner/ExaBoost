@@ -834,13 +834,25 @@ __global__ void SplitTreeStructureKernel(const int left_leaf_index,
     if (global_thread_index == 0) {
       hist_t* parent_hist_ptr = cuda_hist_pool[left_leaf_index];
       cuda_hist_pool[right_leaf_index] = parent_hist_ptr;
-      cuda_hist_pool[left_leaf_index] = USE_GRAD_DISCRETIZED ?
-        cuda_hist + right_leaf_index * num_total_bin :
-        cuda_hist + 2 * right_leaf_index * num_total_bin;
+      // Histogram slots are allocated at a 2 * num_total_bin stride per leaf (see the
+      // cuda_hist_ size num_total_bin * 2 * num_leaves and the right-is-smaller branch
+      // below, which always uses 2 * right_leaf_index * num_total_bin). The discretized
+      // path here previously used a 1x stride (right_leaf_index * num_total_bin), so a
+      // left-is-smaller child could be handed a slot that collides with an existing
+      // 2x-strided leaf -- its histogram then accumulated on top of that leaf's data,
+      // producing phantom splits and exploded leaf outputs under use_quantized_grad.
+      // Use the same 2x stride here for consistency.
+      cuda_hist_pool[left_leaf_index] = cuda_hist + 2 * right_leaf_index * num_total_bin;
       smaller_leaf_splits->hist_in_leaf = cuda_hist_pool[left_leaf_index];
       larger_leaf_splits->hist_in_leaf = cuda_hist_pool[right_leaf_index];
     } else if (global_thread_index == 1) {
       smaller_leaf_splits->sum_of_gradients = best_split_info->left_sum_gradients;
+      if (USE_GRAD_DISCRETIZED) {
+        // The discretized best-split finder uses the int64 packed gradient/hessian
+        // sum as the leaf total; it must be refreshed on split or the child inherits
+        // the parent's total and the finder scores phantom (parent-remainder) splits.
+        smaller_leaf_splits->sum_of_gradients_hessians = best_split_info->left_sum_of_gradients_hessians;
+      }
     } else if (global_thread_index == 2) {
       smaller_leaf_splits->sum_of_hessians = best_split_info->left_sum_hessians;
     } else if (global_thread_index == 3) {
@@ -855,6 +867,9 @@ __global__ void SplitTreeStructureKernel(const int left_leaf_index,
       larger_leaf_splits->leaf_index = right_leaf_index;
     } else if (global_thread_index == 8) {
       larger_leaf_splits->sum_of_gradients = best_split_info->right_sum_gradients;
+      if (USE_GRAD_DISCRETIZED) {
+        larger_leaf_splits->sum_of_gradients_hessians = best_split_info->right_sum_of_gradients_hessians;
+      }
     } else if (global_thread_index == 9) {
       larger_leaf_splits->sum_of_hessians = best_split_info->right_sum_hessians;
     } else if (global_thread_index == 10) {
@@ -877,6 +892,9 @@ __global__ void SplitTreeStructureKernel(const int left_leaf_index,
       larger_leaf_splits->leaf_index = left_leaf_index;
     } else if (global_thread_index == 1) {
       larger_leaf_splits->sum_of_gradients = best_split_info->left_sum_gradients;
+      if (USE_GRAD_DISCRETIZED) {
+        larger_leaf_splits->sum_of_gradients_hessians = best_split_info->left_sum_of_gradients_hessians;
+      }
     } else if (global_thread_index == 2) {
       larger_leaf_splits->sum_of_hessians = best_split_info->left_sum_hessians;
     } else if (global_thread_index == 3) {
@@ -891,6 +909,9 @@ __global__ void SplitTreeStructureKernel(const int left_leaf_index,
       smaller_leaf_splits->leaf_index = right_leaf_index;
     } else if (global_thread_index == 8) {
       smaller_leaf_splits->sum_of_gradients = best_split_info->right_sum_gradients;
+      if (USE_GRAD_DISCRETIZED) {
+        smaller_leaf_splits->sum_of_gradients_hessians = best_split_info->right_sum_of_gradients_hessians;
+      }
     } else if (global_thread_index == 9) {
       smaller_leaf_splits->sum_of_hessians = best_split_info->right_sum_hessians;
     } else if (global_thread_index == 10) {

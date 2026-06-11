@@ -58,7 +58,14 @@ class CUDAGradientDiscretizer: public GradientDiscretizer, public NCCLInfo {
   void Init(const data_size_t num_data, const int num_leaves,
     const int num_features, const Dataset* train_data) override {
     GradientDiscretizer::Init(num_data, num_leaves, num_features, train_data);
-    discretized_gradients_and_hessians_.Resize(num_data * 2);
+    // Each data point stores an int16 gradient and an int16 hessian (see
+    // DiscretizeGradientsKernel, which writes through an int16_t* view). That is
+    // 2 * sizeof(int16_t) = 4 bytes per data point. The buffer is int8_t, so it
+    // must hold num_data * 4 elements; sizing it as num_data * 2 (the original
+    // 8-bit layout) under-allocates by 2x and lets the discretize kernel overrun
+    // into the adjacent gradient/hessian scale buffers, corrupting the dequant
+    // scales and producing garbage leaf sums (no splits under use_quantized_grad).
+    discretized_gradients_and_hessians_.Resize(num_data * 4);
     num_reduce_blocks_ = (num_data + CUDA_GRADIENT_DISCRETIZER_BLOCK_SIZE - 1) / CUDA_GRADIENT_DISCRETIZER_BLOCK_SIZE;
     grad_min_block_buffer_.Resize(num_reduce_blocks_);
     grad_max_block_buffer_.Resize(num_reduce_blocks_);
