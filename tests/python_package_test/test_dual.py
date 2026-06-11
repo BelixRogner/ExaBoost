@@ -374,6 +374,58 @@ def test_cuda_quantized_training_produces_splits(n, num_leaves):
     assert preds.std() > 1e-6, f"CUDA quantized predictions are degenerate/constant (n={n}, num_leaves={num_leaves})"
 
 
+@_REQUIRES_CUDA
+@pytest.mark.parametrize(("n", "seed"), [(1000, 7), (2000, 7), (2000, 11)])
+def test_cuda_quantized_tree_structure_matches_cpu(n, seed):
+    """CUDA quantized trees must grow to roughly the same size as CPU quantized.
+
+    Regression test for the child-leaf packed-sum bugs: the int64 packed
+    gradient/hessian sum (sum_of_gradients_hessians) was (1) dropped by
+    CUDASplitInfo::operator= and (2) never refreshed for child leaves in the
+    data-partition split kernel. The discretized best-split finder uses that
+    packed sum as the leaf total, so children inherited the parent's total,
+    scored phantom splits that partitioned to a 0-data leaf, and CUDA quantized
+    trees stalled at ~2-4 leaves while CPU grew the full 31.
+
+    This guards the structural fix: CUDA must grow to within 20% of CPU's leaf
+    count (the bug capped it far below). It deliberately does NOT assert tight
+    prediction parity -- residual CPU/CUDA divergence remains from the separate
+    open 8-bit-histogram leaf-value bug and from the cross-feature gain-tie
+    ordering (a different branch). min_data_in_leaf is high so leaves stay in
+    the 16-bit histogram regime.
+    """
+    rng = np.random.default_rng(seed)
+    X = rng.standard_normal((n, 12)).astype(np.float64)
+    y = (X @ rng.standard_normal(12) + 0.3 * rng.standard_normal(n)).astype(np.float64)
+    params = {
+        "objective": "regression",
+        "num_leaves": 31,
+        "min_data_in_leaf": 300,
+        "learning_rate": 0.1,
+        "use_quantized_grad": True,
+        "verbose": -1,
+        "deterministic": True,
+        "num_threads": 1,
+        "seed": seed,
+        "gpu_use_dp": True,
+        "force_col_wise": True,
+        "feature_pre_filter": False,
+    }
+    models = {}
+    for device_type in ("cpu", "cuda"):
+        ds = lgb.Dataset(X, label=y, params={"verbose": -1, "feature_pre_filter": False})
+        models[device_type] = lgb.train({**params, "device_type": device_type}, ds, num_boost_round=20)
+
+    cpu_leaves = sum(t["num_leaves"] for t in models["cpu"].dump_model()["tree_info"])
+    cuda_leaves = sum(t["num_leaves"] for t in models["cuda"].dump_model()["tree_info"])
+    # The bug capped CUDA at ~2/tree (~40 total over 20 trees); after the fix it
+    # tracks CPU's count. Require within 20% in both directions.
+    assert 0.8 * cpu_leaves <= cuda_leaves <= 1.2 * cpu_leaves, (
+        f"CUDA quantized tree size diverged: cuda={cuda_leaves} vs cpu={cpu_leaves} (n={n}, seed={seed})"
+    )
+    assert np.all(np.isfinite(models["cuda"].predict(X)))
+
+
 def _train_forced(device_type, forced_split, tmp_path, num_boost_round=10, num_leaves=8, seed=0):
     rng = np.random.RandomState(seed)
     X = rng.rand(400, 6)
