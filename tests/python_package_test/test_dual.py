@@ -322,6 +322,58 @@ def test_cuda_respects_max_depth(max_depth, num_leaves):
     )
 
 
+@_REQUIRES_CUDA
+@pytest.mark.parametrize("n", [200, 500, 1000])
+@pytest.mark.parametrize("num_leaves", [7, 31])
+def test_cuda_quantized_training_produces_splits(n, num_leaves):
+    """CUDA use_quantized_grad training must produce real splitting trees.
+
+    Regression test for the 2x under-allocation of the discretized
+    gradient/hessian buffer (CUDAGradientDiscretizer). The buffer holds an
+    int16 gradient and an int16 hessian per data point (4 bytes), but was
+    sized num_data * 2 bytes. DiscretizeGradientsKernel overran it and
+    corrupted the adjacent dequantization scale buffers, which made the
+    root leaf's sum_hessians come out as a denormal ~0. The root then
+    failed the sum_hessians > min_sum_hessian_in_leaf validity check and
+    never split, so every CUDA quantized tree collapsed to a single leaf
+    and the model did not learn.
+
+    The fix sizes the buffer as num_data * 4. Here we assert that CUDA
+    quantized trees actually split (num_leaves > 1) and that predictions
+    are not the degenerate constant the single-leaf model produced.
+    """
+    rng = np.random.default_rng(7)
+    X = rng.standard_normal((n, 12)).astype(np.float64)
+    y = (X @ rng.standard_normal(12) + 0.3 * rng.standard_normal(n)).astype(np.float64)
+    params = {
+        "objective": "regression",
+        "num_leaves": num_leaves,
+        "min_data_in_leaf": 20,
+        "learning_rate": 0.1,
+        "use_quantized_grad": True,
+        "verbose": -1,
+        "deterministic": True,
+        "num_threads": 1,
+        "seed": 7,
+        "gpu_use_dp": True,
+        "force_col_wise": True,
+        "feature_pre_filter": False,
+        "device_type": "cuda",
+    }
+    ds = lgb.Dataset(X, label=y, params={"verbose": -1, "feature_pre_filter": False})
+    bst = lgb.train(params, ds, num_boost_round=20)
+
+    leaf_counts = [tree["num_leaves"] for tree in bst.dump_model()["tree_info"]]
+    assert max(leaf_counts) > 1, (
+        f"CUDA quantized training collapsed to single-leaf trees "
+        f"(n={n}, num_leaves={num_leaves}): per-tree leaf counts {leaf_counts[:5]}"
+    )
+
+    preds = bst.predict(X)
+    assert np.all(np.isfinite(preds)), "CUDA quantized produced non-finite predictions"
+    assert preds.std() > 1e-6, f"CUDA quantized predictions are degenerate/constant (n={n}, num_leaves={num_leaves})"
+
+
 def _train_forced(device_type, forced_split, tmp_path, num_boost_round=10, num_leaves=8, seed=0):
     rng = np.random.RandomState(seed)
     X = rng.rand(400, 6)
