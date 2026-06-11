@@ -834,9 +834,15 @@ __global__ void SplitTreeStructureKernel(const int left_leaf_index,
     if (global_thread_index == 0) {
       hist_t* parent_hist_ptr = cuda_hist_pool[left_leaf_index];
       cuda_hist_pool[right_leaf_index] = parent_hist_ptr;
-      cuda_hist_pool[left_leaf_index] = USE_GRAD_DISCRETIZED ?
-        cuda_hist + right_leaf_index * num_total_bin :
-        cuda_hist + 2 * right_leaf_index * num_total_bin;
+      // Histogram slots are allocated at a 2 * num_total_bin stride per leaf (see the
+      // cuda_hist_ size num_total_bin * 2 * num_leaves and the right-is-smaller branch
+      // below, which always uses 2 * right_leaf_index * num_total_bin). The discretized
+      // path here previously used a 1x stride (right_leaf_index * num_total_bin), so a
+      // left-is-smaller child could be handed a slot that collides with an existing
+      // 2x-strided leaf -- its histogram then accumulated on top of that leaf's data,
+      // producing phantom splits and exploded leaf outputs under use_quantized_grad.
+      // Use the same 2x stride here for consistency.
+      cuda_hist_pool[left_leaf_index] = cuda_hist + 2 * right_leaf_index * num_total_bin;
       smaller_leaf_splits->hist_in_leaf = cuda_hist_pool[left_leaf_index];
       larger_leaf_splits->hist_in_leaf = cuda_hist_pool[right_leaf_index];
     } else if (global_thread_index == 1) {

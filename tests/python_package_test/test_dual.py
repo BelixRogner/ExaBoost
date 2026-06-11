@@ -426,6 +426,59 @@ def test_cuda_quantized_tree_structure_matches_cpu(n, seed):
     assert np.all(np.isfinite(models["cuda"].predict(X)))
 
 
+@_REQUIRES_CUDA
+@pytest.mark.parametrize(("n", "seed"), [(1000, 7), (2000, 7), (1000, 11)])
+def test_cuda_quantized_deep_trees_track_cpu(n, seed):
+    """Deep CUDA quantized trees (small leaves) must track CPU, not explode.
+
+    Regression test for the histogram-slot collision: in SplitTreeStructureKernel
+    the left-is-smaller branch handed the discretized child a hist slot at a 1x
+    (right_leaf_index * num_total_bin) stride while every other path uses 2x, so a
+    child could be assigned a slot already owned by another leaf. Its histogram then
+    accumulated on top of that leaf's data (e.g. a 45-point leaf's histogram summed
+    to 106 points' worth), yielding phantom splits, 0-data leaves, and leaf outputs
+    that exploded to 1e12-1e20 over 20 rounds at small min_data_in_leaf.
+
+    With min_data_in_leaf=20 the trees go deep (many 8-bit-histogram leaves), which
+    is exactly where the collision bit. After the fix CUDA matches CPU's leaf counts
+    and predictions stay bounded (residual divergence is the separate gain-tie
+    ordering, handled on another branch).
+    """
+    rng = np.random.default_rng(seed)
+    X = rng.standard_normal((n, 12)).astype(np.float64)
+    y = (X @ rng.standard_normal(12) + 0.3 * rng.standard_normal(n)).astype(np.float64)
+    params = {
+        "objective": "regression",
+        "num_leaves": 31,
+        "min_data_in_leaf": 20,
+        "learning_rate": 0.1,
+        "use_quantized_grad": True,
+        "verbose": -1,
+        "deterministic": True,
+        "num_threads": 1,
+        "seed": seed,
+        "gpu_use_dp": True,
+        "force_col_wise": True,
+        "feature_pre_filter": False,
+    }
+    models = {}
+    for device_type in ("cpu", "cuda"):
+        ds = lgb.Dataset(X, label=y, params={"verbose": -1, "feature_pre_filter": False})
+        models[device_type] = lgb.train({**params, "device_type": device_type}, ds, num_boost_round=20)
+
+    cpu_leaves = sum(t["num_leaves"] for t in models["cpu"].dump_model()["tree_info"])
+    cuda_leaves = sum(t["num_leaves"] for t in models["cuda"].dump_model()["tree_info"])
+    assert 0.9 * cpu_leaves <= cuda_leaves <= 1.1 * cpu_leaves, (
+        f"CUDA quantized deep-tree size diverged: cuda={cuda_leaves} vs cpu={cpu_leaves} (n={n}, seed={seed})"
+    )
+    cpu_pred = models["cpu"].predict(X)
+    cuda_pred = models["cuda"].predict(X)
+    assert np.all(np.isfinite(cuda_pred))
+    max_diff = float(np.max(np.abs(cuda_pred - cpu_pred)))
+    # Broken behaviour exploded to >=1e12; the fix brings it to ~1 (gain-tie FP level).
+    assert max_diff < 5.0, f"CUDA quantized deep trees diverge from CPU by {max_diff:.3g} (n={n}, seed={seed})"
+
+
 def _train_forced(device_type, forced_split, tmp_path, num_boost_round=10, num_leaves=8, seed=0):
     rng = np.random.RandomState(seed)
     X = rng.rand(400, 6)
