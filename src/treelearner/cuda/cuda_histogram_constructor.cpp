@@ -44,6 +44,12 @@ CUDAHistogramConstructor::CUDAHistogramConstructor(
 
 CUDAHistogramConstructor::~CUDAHistogramConstructor() {
   gpuAssert(cudaStreamDestroy(cuda_stream_), __FILE__, __LINE__);
+  if (construct_done_event_ != nullptr) {
+    gpuAssert(cudaEventDestroy(construct_done_event_), __FILE__, __LINE__);
+  }
+  if (subtract_done_event_ != nullptr) {
+    gpuAssert(cudaEventDestroy(subtract_done_event_), __FILE__, __LINE__);
+  }
 }
 
 void CUDAHistogramConstructor::InitFeatureMetaInfo(const Dataset* train_data, const std::vector<uint32_t>& feature_hist_offsets) {
@@ -349,6 +355,10 @@ void CUDAHistogramConstructor::Init(const Dataset* train_data, TrainingShareStat
   cuda_row_data_->Init(train_data, share_state);
 
   CUDASUCCESS_OR_FATAL(cudaStreamCreate(&cuda_stream_));
+  // Lightweight (timing-disabled) events used to order the best split finder's
+  // per-leaf kernels after histogram construction/subtraction without a device sync.
+  CUDASUCCESS_OR_FATAL(cudaEventCreateWithFlags(&construct_done_event_, cudaEventDisableTiming));
+  CUDASUCCESS_OR_FATAL(cudaEventCreateWithFlags(&subtract_done_event_, cudaEventDisableTiming));
 
   cuda_need_fix_histogram_features_.InitFromHostVector(need_fix_histogram_features_);
   cuda_need_fix_histogram_features_num_bin_aligned_.InitFromHostVector(need_fix_histogram_features_num_bin_aligend_);
@@ -387,7 +397,10 @@ if ((global_num_data_in_smaller_leaf <= min_data_in_leaf_ || sum_hessians_in_sma
     return;
   }
   LaunchConstructHistogramKernel(cuda_smaller_leaf_splits, num_data_in_smaller_leaf, num_bits_in_histogram_bins);
-  SynchronizeCUDADevice(__FILE__, __LINE__);
+  // Record completion on cuda_stream_ instead of a device-wide sync. The best split
+  // finder waits on this event before reading the smaller-leaf histogram, so the host
+  // is not stalled here (see CUDABestSplitFinder::FindBestSplitsForLeaf).
+  CUDASUCCESS_OR_FATAL(cudaEventRecord(construct_done_event_, cuda_stream_));
 }
 
 void CUDAHistogramConstructor::SubtractHistogramForLeaf(
@@ -400,6 +413,10 @@ void CUDAHistogramConstructor::SubtractHistogramForLeaf(
   global_timer.Start("CUDAHistogramConstructor::ConstructHistogramForLeaf::LaunchSubtractHistogramKernel");
   LaunchSubtractHistogramKernel(cuda_smaller_leaf_splits, cuda_larger_leaf_splits, use_quantized_grad,
                                 parent_num_bits_in_histogram_bins, smaller_num_bits_in_histogram_bins, larger_num_bits_in_histogram_bins);
+  // Record completion on cuda_stream_; the best split finder waits on this before
+  // reading the larger-leaf (subtracted) histogram, replacing the per-split device sync
+  // that previously separated the smaller- and larger-leaf FindBestSplits launches.
+  CUDASUCCESS_OR_FATAL(cudaEventRecord(subtract_done_event_, cuda_stream_));
   global_timer.Stop("CUDAHistogramConstructor::ConstructHistogramForLeaf::LaunchSubtractHistogramKernel");
 }
 

@@ -58,6 +58,15 @@ class CUDABestSplitFinder {
 
   void InitCUDAFeatureMetaInfo();
 
+  /*! \brief Provide the histogram constructor's completion events so the per-leaf
+   *  FindBestSplits kernels can be ordered after histogram construction/subtraction
+   *  via cudaStreamWaitEvent instead of a per-split device sync. Called once after
+   *  both objects are initialized. */
+  void SetHistogramEvents(cudaEvent_t construct_done_event, cudaEvent_t subtract_done_event) {
+    hist_construct_done_event_ = construct_done_event;
+    hist_subtract_done_event_ = subtract_done_event;
+  }
+
   void BeforeTrain(const std::vector<int8_t>& is_feature_used_bytree);
 
   void FindBestSplitsForLeaf(
@@ -240,6 +249,10 @@ class CUDABestSplitFinder {
   bool use_smoothing_;
   double path_smooth_;
   std::vector<cudaStream_t> cuda_streams_;
+  /*! \brief histogram constructor completion events (not owned); used to order the
+   *  per-leaf FindBestSplits kernels after histogram construction/subtraction. */
+  cudaEvent_t hist_construct_done_event_ = nullptr;
+  cudaEvent_t hist_subtract_done_event_ = nullptr;
   // for best split find tasks
   std::vector<SplitFindTask> split_find_tasks_;
   int num_tasks_;

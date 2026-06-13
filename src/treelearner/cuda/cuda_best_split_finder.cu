@@ -1794,19 +1794,36 @@ void CUDABestSplitFinder::LaunchFindBestSplitsForLeafKernelInner2(LaunchFindBest
     is_feature_used_by_smaller_node = is_feature_used_by_smaller_node_.RawData();
     is_feature_used_by_larger_node = is_feature_used_by_larger_node_.RawData();
   }
+  // Order each leaf's FindBestSplits after the histogram it reads, on its own stream,
+  // instead of a device-wide sync: the smaller leaf reads the constructed histogram and
+  // the larger leaf reads the subtracted histogram (both produced on the histogram
+  // constructor's cuda_stream_). cudaStreamWaitEvent keeps the host unstalled and lets
+  // the two leaves run concurrently. construct_done is recorded whenever either leaf is
+  // valid, and subtract every split, so the events are current here.
+  if (is_smaller_leaf_valid) {
+    CUDASUCCESS_OR_FATAL(cudaStreamWaitEvent(cuda_streams_[0], hist_construct_done_event_, 0));
+  }
+  if (is_larger_leaf_valid) {
+    CUDASUCCESS_OR_FATAL(cudaStreamWaitEvent(cuda_streams_[1], hist_subtract_done_event_, 0));
+  }
   if (!use_global_memory_) {
     if (is_smaller_leaf_valid) {
       FindBestSplitsForLeafKernel<USE_RAND, USE_L1, USE_SMOOTHING, false>
         <<<num_tasks_, NUM_THREADS_PER_BLOCK_BEST_SPLIT_FINDER, 0, cuda_streams_[0]>>>
         (is_feature_used_by_smaller_node, FindBestSplitsForLeafKernel_ARGS);
     }
-    SynchronizeCUDADevice(__FILE__, __LINE__);
+    // No device sync here: the larger-leaf launch below waits on subtract_done_event via
+    // its stream, and the smaller/larger leaves write disjoint cuda_best_split_info_ slots.
     if (is_larger_leaf_valid) {
       FindBestSplitsForLeafKernel<USE_RAND, USE_L1, USE_SMOOTHING, true>
         <<<num_tasks_, NUM_THREADS_PER_BLOCK_BEST_SPLIT_FINDER, 0, cuda_streams_[1]>>>
         (is_feature_used_by_larger_node, FindBestSplitsForLeafKernel_ARGS);
     }
   } else {
+    // Global-memory path (large-dataset fallback, not covered by the shared-memory
+    // benchmarks): the construct/subtract waits above provide histogram visibility, but
+    // keep the device sync because the smaller and larger launches share
+    // cuda_feature_hist_grad/hess_buffer_ and must not run concurrently.
     if (is_smaller_leaf_valid) {
       FindBestSplitsForLeafKernel_GlobalMemory<USE_RAND, USE_L1, USE_SMOOTHING, false>
         <<<num_tasks_, NUM_THREADS_PER_BLOCK_BEST_SPLIT_FINDER, 0, cuda_streams_[0]>>>
@@ -1912,13 +1929,16 @@ void CUDABestSplitFinder::LaunchFindBestSplitsDiscretizedForLeafKernelInner1(Lau
 template <bool USE_RAND, bool USE_L1, bool USE_SMOOTHING>
 void CUDABestSplitFinder::LaunchFindBestSplitsDiscretizedForLeafKernelInner2(LaunchFindBestSplitsDiscretizedForLeafKernel_PARAMS) {
   if (!use_global_memory_) {
+    // Order each leaf after the histogram it reads via its own stream (see the
+    // non-discretized path for the rationale); no device sync between the two leaves.
     if (is_smaller_leaf_valid) {
+      CUDASUCCESS_OR_FATAL(cudaStreamWaitEvent(cuda_streams_[0], hist_construct_done_event_, 0));
       FindBestSplitsDiscretizedForLeafKernel<USE_RAND, USE_L1, USE_SMOOTHING, false>
         <<<num_tasks_, NUM_THREADS_PER_BLOCK_BEST_SPLIT_FINDER, 0, cuda_streams_[0]>>>
         (FindBestSplitsDiscretizedForLeafKernel_ARGS);
     }
-    SynchronizeCUDADevice(__FILE__, __LINE__);
     if (is_larger_leaf_valid) {
+      CUDASUCCESS_OR_FATAL(cudaStreamWaitEvent(cuda_streams_[1], hist_subtract_done_event_, 0));
       FindBestSplitsDiscretizedForLeafKernel<USE_RAND, USE_L1, USE_SMOOTHING, true>
         <<<num_tasks_, NUM_THREADS_PER_BLOCK_BEST_SPLIT_FINDER, 0, cuda_streams_[1]>>>
         (FindBestSplitsDiscretizedForLeafKernel_ARGS);
