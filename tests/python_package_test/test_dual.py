@@ -442,3 +442,50 @@ def test_cuda_forced_splits_match_cpu(case, num_leaves, seed, tmp_path):
         atol=1e-10,
         err_msg=f"forced splits case={case}: CUDA diverges from CPU",
     )
+
+
+@_REQUIRES_CUDA
+@pytest.mark.parametrize("num_leaves", [7, 31, 63])
+def test_cuda_syncbestsplit_overlap_matches_cpu(num_leaves):
+    """Multi-leaf CUDA training must match CPU after overlapping the two child
+    leaves' SyncBestSplit reduction.
+
+    LaunchSyncBestSplitForLeafKernel used to reduce the smaller and larger child
+    leaves' per-feature best splits with two kernel launches separated by a full
+    device sync. That sync was dropped and the two leaves now reduce concurrently
+    on separate streams (each reads only the cuda_best_split_info_ region that
+    FindBestSplitsForLeafKernel wrote on that same stream). Building trees with
+    several leaves exercises the both-child-leaves-valid path this touches; CUDA
+    must stay bit-for-bit aligned with CPU on the deterministic single-thread,
+    double-precision config.
+    """
+    rng = np.random.default_rng(0)
+    n = 2000
+    X = rng.standard_normal((n, 10)).astype(np.float64)
+    y = (X @ rng.standard_normal(10) + 0.1 * rng.standard_normal(n)).astype(np.float64)
+
+    preds = {}
+    for device_type in ("cpu", "cuda"):
+        params = {
+            "objective": "regression",
+            "verbose": -1,
+            "deterministic": True,
+            "num_threads": 1,
+            "seed": 0,
+            "feature_pre_filter": False,
+            "device_type": device_type,
+            "gpu_use_dp": True,
+            "force_col_wise": True,
+            "num_leaves": num_leaves,
+            "min_data_in_leaf": 5,
+        }
+        ds = lgb.Dataset(X, label=y, params={"verbose": -1, "feature_pre_filter": False})
+        preds[device_type] = lgb.train(params, ds, num_boost_round=5).predict(X)
+
+    np.testing.assert_allclose(
+        preds["cuda"],
+        preds["cpu"],
+        rtol=0,
+        atol=1e-9,
+        err_msg=f"num_leaves={num_leaves}: CUDA SyncBestSplit overlap diverges from CPU",
+    )
