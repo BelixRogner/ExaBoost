@@ -43,9 +43,7 @@ def _get_init_score(device_type, objective, alpha, X, y):
     for line in buf.getvalue().splitlines():
         if "Start training from score" in line:
             return float(line.split("score")[-1].strip())
-    raise AssertionError(
-        f"no init score logged for {device_type} {objective} alpha={alpha}"
-    )
+    raise AssertionError(f"no init score logged for {device_type} {objective} alpha={alpha}")
 
 
 @_REQUIRES_CUDA
@@ -66,9 +64,7 @@ def test_cuda_init_score_matches_cpu(objective, alpha, n):
     y = np.arange(1, n + 1, dtype=np.float64)
     cpu = _get_init_score("cpu", objective, alpha, X, y)
     cuda = _get_init_score("cuda", objective, alpha, X, y)
-    assert cuda == pytest.approx(cpu, abs=1e-6), (
-        f"{objective} alpha={alpha} n={n}: cpu={cpu} cuda={cuda}"
-    )
+    assert cuda == pytest.approx(cpu, abs=1e-6), f"{objective} alpha={alpha} n={n}: cpu={cpu} cuda={cuda}"
 
 
 _REQUIRES_CUDA = pytest.mark.skipif(
@@ -89,9 +85,7 @@ def test_cuda_weighted_percentile_renewal_does_not_crash(objective, n):
     X = rng.standard_normal((n, 3)).astype(np.float64)
     y = rng.standard_normal(n).astype(np.float64)
     w = rng.random(n)
-    ds = lgb.Dataset(
-        X, label=y, weight=w, params={"verbose": -1, "feature_pre_filter": False}
-    )
+    ds = lgb.Dataset(X, label=y, weight=w, params={"verbose": -1, "feature_pre_filter": False})
     params = {
         "objective": objective,
         "alpha": 0.5,
@@ -105,9 +99,7 @@ def test_cuda_weighted_percentile_renewal_does_not_crash(objective, n):
     # If the OOB access regresses, this raises a CUDA "illegal memory access" error.
     bst = lgb.train(params, ds, num_boost_round=2)
     preds = bst.predict(X, raw_score=True)
-    assert np.all(np.isfinite(preds)), (
-        "weighted percentile renewal produced non-finite predictions"
-    )
+    assert np.all(np.isfinite(preds)), "weighted percentile renewal produced non-finite predictions"
 
 
 @pytest.mark.skipif(
@@ -282,9 +274,7 @@ def _train_pair(params_overrides, X, y):
             "force_col_wise": True,
             **params_overrides,
         }
-        ds = lgb.Dataset(
-            X, label=y, params={"verbose": -1, "feature_pre_filter": False}
-        )
+        ds = lgb.Dataset(X, label=y, params={"verbose": -1, "feature_pre_filter": False})
         out[device_type] = lgb.train(params, ds, num_boost_round=1)
     return out
 
@@ -348,9 +338,7 @@ def test_cuda_respects_max_depth(max_depth, num_leaves):
         (2000, 31, 0.7, 1),
     ],
 )
-def test_cuda_bagging_does_not_crash_and_matches_cpu(
-    n, num_leaves, bagging_fraction, bagging_freq
-):
+def test_cuda_bagging_does_not_crash_and_matches_cpu(n, num_leaves, bagging_fraction, bagging_freq):
     """CUDA training with bagging must not crash and must track CPU.
 
     Regression test for two independent CUDA bugs that made *any* bagged run
@@ -399,15 +387,11 @@ def test_cuda_bagging_does_not_crash_and_matches_cpu(
             "bagging_freq": bagging_freq,
             "bagging_seed": 3,
         }
-        ds = lgb.Dataset(
-            X, label=y, params={"verbose": -1, "feature_pre_filter": False}
-        )
+        ds = lgb.Dataset(X, label=y, params={"verbose": -1, "feature_pre_filter": False})
         bst = lgb.train(params, ds, num_boost_round=20)
         preds[device_type] = bst.predict(X, raw_score=True)
 
-    assert np.all(np.isfinite(preds["cuda"])), (
-        "CUDA bagging produced non-finite predictions"
-    )
+    assert np.all(np.isfinite(preds["cuda"])), "CUDA bagging produced non-finite predictions"
     # Bagging samples a different bag on CUDA than on CPU (different RNG stream),
     # so predictions are not bit-identical; #6055 documents this as expected.
     # The bar here is "same ballpark" -- strict enough to catch a model that
