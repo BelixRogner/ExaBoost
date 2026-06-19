@@ -41,7 +41,13 @@ class CUDAColumnData {
             const std::vector<uint8_t>& feature_mfb_is_na,
             const std::vector<int>& feature_to_column);
 
-  const uint8_t* GetColumnData(const int column_index) const { return data_by_column_[column_index]->RawData(); }
+  const uint8_t* GetColumnData(const int column_index) const {
+    // In the skip-allocation path, data_by_column_[c] is null; the per-column
+    // device pointers live in the per-tree compact view (set by
+    // SetCompactColumnView). Read those instead to avoid a host null-deref.
+    if (init_skipped_per_column_alloc_) { return compact_column_host_view_[column_index]; }
+    return data_by_column_[column_index]->RawData();
+  }
 
   void CopySubrow(const CUDAColumnData* full_set, const data_size_t* used_indices, const data_size_t num_used_indices);
 
@@ -147,6 +153,11 @@ class CUDAColumnData {
   CUDAVector<uint8_t*> cuda_data_by_column_;
   std::vector<int> feature_to_column_;
   std::vector<std::unique_ptr<CUDAVector<uint8_t>>> data_by_column_;
+  // Host mirror of the per-column device pointers when init_skipped_per_column_alloc_
+  // is set: each entry points into the per-tree compact buffer (slot * num_data),
+  // or nullptr for non-sampled columns. Populated by SetCompactColumnView so that
+  // GetColumnData has a valid host-readable device pointer for the split column.
+  std::vector<uint8_t*> compact_column_host_view_;
 
   CUDAVector<uint8_t> cuda_column_bit_type_;
   CUDAVector<uint32_t> cuda_feature_min_bin_;
