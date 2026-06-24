@@ -43,9 +43,7 @@ def _get_init_score(device_type, objective, alpha, X, y):
     for line in buf.getvalue().splitlines():
         if "Start training from score" in line:
             return float(line.split("score")[-1].strip())
-    raise AssertionError(
-        f"no init score logged for {device_type} {objective} alpha={alpha}"
-    )
+    raise AssertionError(f"no init score logged for {device_type} {objective} alpha={alpha}")
 
 
 @_REQUIRES_CUDA
@@ -66,9 +64,7 @@ def test_cuda_init_score_matches_cpu(objective, alpha, n):
     y = np.arange(1, n + 1, dtype=np.float64)
     cpu = _get_init_score("cpu", objective, alpha, X, y)
     cuda = _get_init_score("cuda", objective, alpha, X, y)
-    assert cuda == pytest.approx(cpu, abs=1e-6), (
-        f"{objective} alpha={alpha} n={n}: cpu={cpu} cuda={cuda}"
-    )
+    assert cuda == pytest.approx(cpu, abs=1e-6), f"{objective} alpha={alpha} n={n}: cpu={cpu} cuda={cuda}"
 
 
 _REQUIRES_CUDA = pytest.mark.skipif(
@@ -89,9 +85,7 @@ def test_cuda_weighted_percentile_renewal_does_not_crash(objective, n):
     X = rng.standard_normal((n, 3)).astype(np.float64)
     y = rng.standard_normal(n).astype(np.float64)
     w = rng.random(n)
-    ds = lgb.Dataset(
-        X, label=y, weight=w, params={"verbose": -1, "feature_pre_filter": False}
-    )
+    ds = lgb.Dataset(X, label=y, weight=w, params={"verbose": -1, "feature_pre_filter": False})
     params = {
         "objective": objective,
         "alpha": 0.5,
@@ -105,9 +99,7 @@ def test_cuda_weighted_percentile_renewal_does_not_crash(objective, n):
     # If the OOB access regresses, this raises a CUDA "illegal memory access" error.
     bst = lgb.train(params, ds, num_boost_round=2)
     preds = bst.predict(X, raw_score=True)
-    assert np.all(np.isfinite(preds)), (
-        "weighted percentile renewal produced non-finite predictions"
-    )
+    assert np.all(np.isfinite(preds)), "weighted percentile renewal produced non-finite predictions"
 
 
 @pytest.mark.skipif(
@@ -282,9 +274,7 @@ def _train_pair(params_overrides, X, y):
             "force_col_wise": True,
             **params_overrides,
         }
-        ds = lgb.Dataset(
-            X, label=y, params={"verbose": -1, "feature_pre_filter": False}
-        )
+        ds = lgb.Dataset(X, label=y, params={"verbose": -1, "feature_pre_filter": False})
         out[device_type] = lgb.train(params, ds, num_boost_round=1)
     return out
 
@@ -338,8 +328,12 @@ def test_cuda_respects_max_depth(max_depth, num_leaves):
     )
 
 
+# Every n here has grid(n) < 80 while a child leaf can land in the ~101-160 band
+# (grid up to 80), so a child leaf's grid exceeds the root grid and overruns the
+# construction-time buffer. The earlier 120/150/159 were dead: for those the root
+# grid is already the band maximum, so no child leaf can exceed it.
 @_REQUIRES_CUDA
-@pytest.mark.parametrize("n", [120, 150, 159, 200, 250])
+@pytest.mark.parametrize("n", [200, 250, 300, 400])
 @pytest.mark.parametrize("num_leaves", [7, 15, 31])
 def test_cuda_data_partition_block_offset_no_overflow(n, num_leaves):
     """CUDA training must match CPU when a split processes a leaf whose grid
@@ -382,9 +376,58 @@ def test_cuda_data_partition_block_offset_no_overflow(n, num_leaves):
             "learning_rate": 0.1,
             "min_data_in_leaf": 5,
         }
-        ds = lgb.Dataset(
-            X, label=y, params={"verbose": -1, "feature_pre_filter": False}
-        )
+        ds = lgb.Dataset(X, label=y, params={"verbose": -1, "feature_pre_filter": False})
+        bst = lgb.train(params, ds, num_boost_round=5)
+        preds[device_type] = bst.predict(X, raw_score=True)
+
+    assert np.all(np.isfinite(preds["cuda"])), "CUDA produced non-finite predictions"
+    np.testing.assert_allclose(preds["cuda"], preds["cpu"], atol=1e-10)
+
+
+# (n, bagging_fraction) chosen so grid(n) < grid(round(n*fraction)): the full dataset
+# has a small grid, but the bagged root lands in the ~101-160 band (grid 51-80) and so
+# needs more blocks than the construction-time buffer sized for the full dataset. This
+# is the "bagged root" path called out above -- the overflow happens at the very first
+# Split(), before any child leaf, which the non-bagged test cannot reach.
+@_REQUIRES_CUDA
+@pytest.mark.parametrize(("n", "bagging_fraction"), [(200, 0.65), (250, 0.55), (400, 0.35), (1000, 0.14)])
+@pytest.mark.parametrize("num_leaves", [7, 31])
+def test_cuda_data_partition_block_offset_no_overflow_bagged(n, bagging_fraction, num_leaves):
+    """CUDA bagged training must match CPU when the bagged root's grid exceeds the
+    full-dataset grid the offset buffers were sized for.
+
+    Same out-of-bounds write as test_cuda_data_partition_block_offset_no_overflow, but
+    triggered at the root: max_num_split_indices_blocks_ is sized for num_data_ at
+    construction, yet under bagging the root leaf holds only num_used_indices rows. When
+    that count lands in the high-grid 101-160 band while the full dataset's grid is
+    smaller, the root Split() needs a larger grid than the buffer was allocated for. The
+    fix grows cuda_block_data_to_{left,right}_offset_ on demand in Split().
+    """
+    rng = np.random.default_rng(13)
+    d = 8
+    X = rng.standard_normal((n, d)).astype(np.float64)
+    coef = rng.standard_normal(d)
+    y = (X @ coef + 0.1 * rng.standard_normal(n)).astype(np.float64)
+
+    preds = {}
+    for device_type in ("cpu", "cuda"):
+        params = {
+            "objective": "regression",
+            "verbose": -1,
+            "deterministic": True,
+            "num_threads": 1,
+            "seed": 42,
+            "feature_pre_filter": False,
+            "device_type": device_type,
+            "gpu_use_dp": True,
+            "force_col_wise": True,
+            "num_leaves": num_leaves,
+            "learning_rate": 0.1,
+            "min_data_in_leaf": 5,
+            "bagging_fraction": bagging_fraction,
+            "bagging_freq": 1,
+        }
+        ds = lgb.Dataset(X, label=y, params={"verbose": -1, "feature_pre_filter": False})
         bst = lgb.train(params, ds, num_boost_round=5)
         preds[device_type] = bst.predict(X, raw_score=True)
 
