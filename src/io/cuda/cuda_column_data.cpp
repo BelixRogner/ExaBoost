@@ -87,6 +87,9 @@ void CUDAColumnData::Init(const int num_columns,
   if (init_skipped_per_column_alloc_) {
     Log::Warning("CUDAColumnData: skipping per-column allocation (would be %.2f GB). "
                  "Caller must invoke SetCompactColumnView per tree.", expected_total_bytes / 1e9);
+    // Safety: ensure GetColumnData() has a valid (null-filled) host view until
+    // SetCompactColumnView populates it for the first tree.
+    compact_column_host_view_.assign(num_columns_, nullptr);
   }
   for (int column_index = 0; column_index < num_columns_; ++column_index) {
     data_by_column_.emplace_back(new CUDAVector<uint8_t>());
@@ -233,6 +236,9 @@ void CUDAColumnData::SetCompactColumnView(const std::vector<int>& column_to_comp
     }
   }
   cuda_data_by_column_.InitFromHostVector(view);
+  // Keep a host-readable mirror so GetColumnData() can return the split column's
+  // device pointer in the skip-allocation path (data_by_column_ stays null there).
+  compact_column_host_view_ = view;
 }
 
 void CUDAColumnData::RestoreOriginalColumnView() {
