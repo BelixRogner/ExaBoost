@@ -1797,7 +1797,7 @@ void CUDABestSplitFinder::LaunchFindBestSplitsForLeafKernelInner2(LaunchFindBest
   // Order each leaf's FindBestSplits after the histogram it reads, on its own stream,
   // instead of a device-wide sync: the smaller leaf reads the constructed histogram and
   // the larger leaf reads the subtracted histogram (both produced on the histogram
-  // constructor's cuda_stream_). cudaStreamWaitEvent keeps the host unstalled and lets
+  // constructor's cuda_stream_). cudaStreamWaitEvent keeps the host from stalling and lets
   // the two leaves run concurrently. construct_done is recorded whenever either leaf is
   // valid, and subtract every split, so the events are current here.
   if (is_smaller_leaf_valid) {
