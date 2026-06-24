@@ -45,7 +45,9 @@ class CUDAColumnData {
     // In the skip-allocation path, data_by_column_[c] is null; the per-column
     // device pointers live in the per-tree compact view (set by
     // SetCompactColumnView). Read those instead to avoid a host null-deref.
-    if (init_skipped_per_column_alloc_) { return compact_column_host_view_[column_index]; }
+    if (init_skipped_per_column_alloc_) {
+      return compact_column_host_view_[column_index];
+    }
     return data_by_column_[column_index]->RawData();
   }
 
