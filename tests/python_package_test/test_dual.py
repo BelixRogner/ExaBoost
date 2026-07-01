@@ -328,6 +328,62 @@ def test_cuda_respects_max_depth(max_depth, num_leaves):
     )
 
 
+# Every n here has grid(n) < 80 while a child leaf can land in the ~101-160 band
+# (grid up to 80), so a child leaf's grid exceeds the root grid and overruns the
+# construction-time buffer. The earlier 120/150/159 were dead: for those the root
+# grid is already the band maximum, so no child leaf can exceed it.
+@_REQUIRES_CUDA
+@pytest.mark.parametrize("n", [200, 250, 300, 400])
+@pytest.mark.parametrize("num_leaves", [7, 15, 31])
+def test_cuda_data_partition_block_offset_no_overflow(n, num_leaves):
+    """CUDA training must match CPU when a split processes a leaf whose grid
+    exceeds the full-dataset grid.
+
+    Regression guard for the out-of-bounds __global__ write in
+    GenDataToLeftBitVectorKernel's PrepareOffset. CUDADataPartition::CalcBlockDim
+    is non-monotonic (the per-block data count is rounded up to a power of two),
+    so a leaf in the ~101-160 range can need more blocks than the full dataset,
+    while cuda_block_data_to_{left,right}_offset_ were sized only for the
+    full-dataset grid. compute-sanitizer flags the overflow as an invalid device
+    write; the fix grows those buffers on demand in CUDADataPartition::Split.
+
+    The bug is silent on most allocators (the overflow stays within the
+    allocation's slack, so predictions remain bit-identical), which is exactly
+    why it went unnoticed -- this parity test pins the scenario so any future
+    change that makes the overflow corrupt results, or that reintroduces the
+    crash on a stricter allocator, is caught. Run under compute-sanitizer to see
+    the underlying memory error without the fix.
+    """
+    rng = np.random.default_rng(11)
+    d = 8
+    X = rng.standard_normal((n, d)).astype(np.float64)
+    coef = rng.standard_normal(d)
+    y = (X @ coef + 0.1 * rng.standard_normal(n)).astype(np.float64)
+
+    preds = {}
+    for device_type in ("cpu", "cuda"):
+        params = {
+            "objective": "regression",
+            "verbose": -1,
+            "deterministic": True,
+            "num_threads": 1,
+            "seed": 42,
+            "feature_pre_filter": False,
+            "device_type": device_type,
+            "gpu_use_dp": True,
+            "force_col_wise": True,
+            "num_leaves": num_leaves,
+            "learning_rate": 0.1,
+            "min_data_in_leaf": 5,
+        }
+        ds = lgb.Dataset(X, label=y, params={"verbose": -1, "feature_pre_filter": False})
+        bst = lgb.train(params, ds, num_boost_round=5)
+        preds[device_type] = bst.predict(X, raw_score=True)
+
+    assert np.all(np.isfinite(preds["cuda"])), "CUDA produced non-finite predictions"
+    np.testing.assert_allclose(preds["cuda"], preds["cpu"], atol=1e-10)
+
+
 @_REQUIRES_CUDA
 @pytest.mark.parametrize(
     ("n", "num_leaves", "bagging_fraction", "bagging_freq"),
