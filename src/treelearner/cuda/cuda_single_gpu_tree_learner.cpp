@@ -15,6 +15,8 @@
 #include <LightGBM/network.h>
 #include <LightGBM/objective_function.h>
 
+#include <Eigen/Dense>
+
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
@@ -106,6 +108,10 @@ void CUDASingleGPUTreeLearner::Init(const Dataset* train_data, bool is_constant_
   host_gradients_.resize(num_data_, 0.0f);
   host_hessians_.resize(num_data_, 0.0f);
   #endif  // DEBUG
+
+  if (config_->linear_tree) {
+    InitLinearTreeCUDA(train_data_);
+  }
 }
 
 void CUDASingleGPUTreeLearner::BeforeTrain() {
@@ -279,17 +285,35 @@ void CUDASingleGPUTreeLearner::BuildCompactColumnView() {
 }
 
 void CUDASingleGPUTreeLearner::AddPredictionToScore(const Tree* tree, double* out_score) const {
+  if (config_->linear_tree && last_tree_is_linear_ && tree->is_linear()) {
+    // Linear tree: score += leaf_const + sum(coeff * raw_feat), NaN -> leaf_output.
+    // Build the device model from the tree's current (post-shrinkage) coeffs, then
+    // reuse the just-trained tree's per-data leaf assignment held by the data partition.
+    BuildAndUploadLinearScoreModel(tree);
+    LaunchLinearAddScoreKernel(
+      cuda_data_partition_->cuda_data_index_to_leaf_index(),
+      cuda_linear_leaf_const_.RawData(),
+      cuda_linear_leaf_coeff_.RawData(),
+      cuda_linear_leaf_coeff_offset_.RawData(),
+      cuda_linear_leaf_coeff_col_.RawData(),
+      cuda_linear_leaf_num_coeff_.RawData(),
+      cuda_linear_leaf_output_.RawData(),
+      out_score);
+    return;
+  }
   cuda_data_partition_->UpdateTrainScore(tree, out_score);
 }
 
 Tree* CUDASingleGPUTreeLearner::Train(const score_t* gradients,
-  const score_t* hessians, bool /*is_first_tree*/) {
+  const score_t* hessians, bool is_first_tree) {
   gradients_ = gradients;
   hessians_ = hessians;
   global_timer.Start("CUDASingleGPUTreeLearner::BeforeTrain");
   BeforeTrain();
   global_timer.Stop("CUDASingleGPUTreeLearner::BeforeTrain");
-  const bool track_branch_features = !(config_->interaction_constraints_vector.empty());
+  // linear trees need per-leaf branch features to know which features each leaf's
+  // linear model uses (mirrors the CPU LinearTreeLearner using new Tree(.., true, true)).
+  const bool track_branch_features = !(config_->interaction_constraints_vector.empty()) || config_->linear_tree;
   std::unique_ptr<CUDATree> tree(new CUDATree(config_->num_leaves, track_branch_features,
     config_->linear_tree, gpu_device_id_, has_categorical_feature_));
   // set the root value by hand, as it is not handled by splits
@@ -480,6 +504,12 @@ Tree* CUDASingleGPUTreeLearner::Train(const score_t* gradients,
     global_timer.Stop("CUDASingleGPUTreeLearner::RenewDiscretizedTreeLeaves");
   }
   tree->ToHost();
+  last_tree_is_linear_ = false;
+  if (config_->linear_tree) {
+    // gradients_/hessians_ are device pointers after BeforeTrain (the Train args stay on host)
+    CalculateLinearCUDA(tree.get(), gradients_, hessians_, is_first_tree);
+    last_tree_is_linear_ = true;
+  }
   return tree.release();
 }
 
@@ -1010,6 +1040,190 @@ void CUDASingleGPUTreeLearner::NCCLReduceHistogram() {
       nccl_stream_);
   }
   SynchronizeCUDAStream(nccl_stream_, __FILE__, __LINE__);
+}
+
+void CUDASingleGPUTreeLearner::InitLinearTreeCUDA(const Dataset* train_data) {
+  num_numeric_features_ = train_data->num_numeric_features();
+  const int num_features = train_data->num_features();
+  // Reproduce Dataset::numeric_feature_map_: numeric features numbered in feature order.
+  inner_feature_to_numeric_col_.assign(num_features, -1);
+  int col = 0;
+  for (int feat = 0; feat < num_features; ++feat) {
+    if (train_data->FeatureBinMapper(feat)->bin_type() == BinType::NumericalBin) {
+      inner_feature_to_numeric_col_[feat] = col;
+      ++col;
+    }
+  }
+  CHECK_EQ(col, num_numeric_features_);
+  if (num_numeric_features_ == 0) {
+    return;
+  }
+  // Upload raw (un-binned) float columns, feature-major, matching host raw_index().
+  const size_t total = static_cast<size_t>(num_numeric_features_) * static_cast<size_t>(num_data_);
+  cuda_raw_data_.Resize(total);
+  for (int feat = 0; feat < num_features; ++feat) {
+    const int c = inner_feature_to_numeric_col_[feat];
+    if (c < 0) {
+      continue;
+    }
+    CopyFromHostToCUDADevice<float>(
+      cuda_raw_data_.RawData() + static_cast<size_t>(c) * static_cast<size_t>(num_data_),
+      train_data->raw_index(feat), static_cast<size_t>(num_data_), __FILE__, __LINE__);
+  }
+}
+
+void CUDASingleGPUTreeLearner::CalculateLinearCUDA(
+    CUDATree* tree, const score_t* gradients, const score_t* hessians, bool is_first_tree) {
+  tree->SetIsLinear(true);
+  const int num_leaves = tree->num_leaves();
+
+  if (is_first_tree) {
+    // First tree: leaf_const = leaf output, no coefficients (matches CPU CalculateLinear).
+    for (int leaf = 0; leaf < num_leaves; ++leaf) {
+      tree->SetLeafConst(leaf, tree->LeafOutput(leaf));
+    }
+    return;
+  }
+
+  // ---- build per-leaf numeric feature lists from branch features (non-refit path) ----
+  std::vector<std::vector<int>> leaf_feat_inner(num_leaves);  // inner feature indices
+  std::vector<int> host_num_feat(num_leaves, 0);
+  std::vector<int> feat_offset(num_leaves + 1, 0);
+  std::vector<int> xthx_offset(num_leaves + 1, 0);
+  std::vector<int> xtg_offset(num_leaves + 1, 0);
+  std::vector<int> feat_col_flat;
+  for (int leaf = 0; leaf < num_leaves; ++leaf) {
+    std::vector<int> raw_features = tree->branch_features(leaf);
+    std::sort(raw_features.begin(), raw_features.end());
+    raw_features.erase(std::unique(raw_features.begin(), raw_features.end()), raw_features.end());
+    for (int real_feat : raw_features) {
+      const int inner = train_data_->InnerFeatureIndex(real_feat);
+      if (inner < 0) {
+        continue;
+      }
+      if (train_data_->FeatureBinMapper(inner)->bin_type() == BinType::NumericalBin) {
+        leaf_feat_inner[leaf].push_back(inner);
+        feat_col_flat.push_back(inner_feature_to_numeric_col_[inner]);
+      }
+    }
+    const int nf = static_cast<int>(leaf_feat_inner[leaf].size());
+    // the gram kernel holds one row of features in a fixed-size register array
+    CHECK_LE(nf, 256);
+    host_num_feat[leaf] = nf;
+    feat_offset[leaf + 1] = feat_offset[leaf] + nf;
+    xthx_offset[leaf + 1] = xthx_offset[leaf] + (nf + 1) * (nf + 2) / 2;
+    xtg_offset[leaf + 1] = xtg_offset[leaf] + (nf + 1);
+  }
+
+  // ---- device buffers + accumulation kernel ----
+  CUDAVector<int> d_num_feat, d_feat_offset, d_feat_col, d_xthx_offset, d_xtg_offset;
+  d_num_feat.InitFromHostVector(host_num_feat);
+  d_feat_offset.InitFromHostVector(feat_offset);
+  d_xthx_offset.InitFromHostVector(xthx_offset);
+  d_xtg_offset.InitFromHostVector(xtg_offset);
+  if (feat_col_flat.empty()) {
+    d_feat_col.Resize(1);
+  } else {
+    d_feat_col.InitFromHostVector(feat_col_flat);
+  }
+  const int total_xthx = xthx_offset[num_leaves];
+  const int total_xtg = xtg_offset[num_leaves];
+  cuda_linear_xthx_.Resize(static_cast<size_t>(total_xthx));
+  cuda_linear_xtg_.Resize(static_cast<size_t>(total_xtg));
+  cuda_linear_nonzero_.Resize(static_cast<size_t>(num_leaves));
+  cuda_linear_xthx_.SetValue(0);
+  cuda_linear_xtg_.SetValue(0);
+  cuda_linear_nonzero_.SetValue(0);
+
+  LaunchCalcLinearGramKernel(
+    cuda_data_partition_->cuda_data_index_to_leaf_index(), gradients, hessians,
+    d_num_feat.RawData(), d_feat_offset.RawData(), d_feat_col.RawData(),
+    d_xthx_offset.RawData(), d_xtg_offset.RawData(), num_leaves,
+    cuda_linear_xthx_.RawData(), cuda_linear_xtg_.RawData(), cuda_linear_nonzero_.RawData());
+
+  std::vector<double> h_xthx(total_xthx), h_xtg(total_xtg);
+  std::vector<int> h_nonzero(num_leaves);
+  CopyFromCUDADeviceToHost<double>(h_xthx.data(), cuda_linear_xthx_.RawData(), total_xthx, __FILE__, __LINE__);
+  CopyFromCUDADeviceToHost<double>(h_xtg.data(), cuda_linear_xtg_.RawData(), total_xtg, __FILE__, __LINE__);
+  CopyFromCUDADeviceToHost<int>(h_nonzero.data(), cuda_linear_nonzero_.RawData(), num_leaves, __FILE__, __LINE__);
+
+  // ---- per-leaf solve (host Eigen, matching CPU exactly) + store into tree ----
+  const double lambda = config_->linear_lambda;
+  for (int leaf = 0; leaf < num_leaves; ++leaf) {
+    const int num_feat = host_num_feat[leaf];
+    if (h_nonzero[leaf] < num_feat + 1) {
+      // degenerate leaf: constant model (matches CPU non-refit branch)
+      tree->SetLeafConst(leaf, tree->LeafOutput(leaf));
+      continue;
+    }
+    Eigen::MatrixXd XTHX_mat(num_feat + 1, num_feat + 1);
+    Eigen::MatrixXd XTg_mat(num_feat + 1, 1);
+    const int xo = xthx_offset[leaf];
+    const int go = xtg_offset[leaf];
+    int j = 0;
+    for (int f1 = 0; f1 < num_feat + 1; ++f1) {
+      for (int f2 = f1; f2 < num_feat + 1; ++f2) {
+        XTHX_mat(f1, f2) = h_xthx[xo + j];
+        XTHX_mat(f2, f1) = XTHX_mat(f1, f2);
+        if (f1 == f2 && f1 < num_feat) {
+          XTHX_mat(f1, f2) += lambda;
+        }
+        ++j;
+      }
+      XTg_mat(f1) = h_xtg[go + f1];
+    }
+    Eigen::MatrixXd coeffs = -XTHX_mat.fullPivLu().inverse() * XTg_mat;
+    std::vector<double> coeffs_vec;
+    std::vector<int> features_new;  // inner feature indices
+    for (int i = 0; i < num_feat; ++i) {
+      if (coeffs(i) < -kZeroThreshold || coeffs(i) > kZeroThreshold) {
+        coeffs_vec.push_back(coeffs(i));
+        features_new.push_back(leaf_feat_inner[leaf][i]);
+      }
+    }
+    tree->SetLeafFeaturesInner(leaf, features_new);
+    std::vector<int> features_raw(features_new.size());
+    for (size_t i = 0; i < features_new.size(); ++i) {
+      features_raw[i] = train_data_->RealFeatureIndex(features_new[i]);
+    }
+    tree->SetLeafFeatures(leaf, features_raw);
+    tree->SetLeafCoeffs(leaf, coeffs_vec);
+    tree->SetLeafConst(leaf, coeffs(num_feat));
+  }
+}
+
+void CUDASingleGPUTreeLearner::BuildAndUploadLinearScoreModel(const Tree* tree) const {
+  // Read the tree's current (already-shrunk-by-learning-rate) per-leaf linear model
+  // and flatten it for the score kernel. Mirrors the CPU LinearTreeLearner reading
+  // tree->LeafConst/LeafCoeffs/LeafFeaturesInner at score time.
+  const int num_leaves = tree->num_leaves();
+  std::vector<double> leaf_const(num_leaves), leaf_output(num_leaves);
+  std::vector<int> num_coeff(num_leaves, 0), coeff_offset(num_leaves + 1, 0);
+  std::vector<double> coeff_flat;
+  std::vector<int> coeff_col;
+  for (int leaf = 0; leaf < num_leaves; ++leaf) {
+    leaf_const[leaf] = tree->LeafConst(leaf);
+    leaf_output[leaf] = tree->LeafOutput(leaf);
+    const std::vector<double>& c = tree->LeafCoeffs(leaf);
+    const std::vector<int>& inner = tree->LeafFeaturesInner(leaf);
+    for (size_t i = 0; i < c.size(); ++i) {
+      coeff_flat.push_back(c[i]);
+      coeff_col.push_back(inner_feature_to_numeric_col_[inner[i]]);
+    }
+    num_coeff[leaf] = static_cast<int>(c.size());
+    coeff_offset[leaf + 1] = coeff_offset[leaf] + num_coeff[leaf];
+  }
+  cuda_linear_leaf_const_.InitFromHostVector(leaf_const);
+  cuda_linear_leaf_output_.InitFromHostVector(leaf_output);
+  cuda_linear_leaf_num_coeff_.InitFromHostVector(num_coeff);
+  cuda_linear_leaf_coeff_offset_.InitFromHostVector(coeff_offset);
+  if (coeff_flat.empty()) {  // CUDAVector cannot init from an empty vector
+    cuda_linear_leaf_coeff_.Resize(1);
+    cuda_linear_leaf_coeff_col_.Resize(1);
+  } else {
+    cuda_linear_leaf_coeff_.InitFromHostVector(coeff_flat);
+    cuda_linear_leaf_coeff_col_.InitFromHostVector(coeff_col);
+  }
 }
 
 }  // namespace LightGBM

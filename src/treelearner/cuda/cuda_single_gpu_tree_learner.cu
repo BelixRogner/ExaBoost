@@ -291,6 +291,139 @@ void CUDASingleGPUTreeLearner::LaunchCalcLeafValuesGivenGradStat(
   #undef CalcRefitLeafOutputKernel_ARGS
 }
 
+// ---- linear tree ----
+// Max distinct numerical features on any leaf's root->leaf path we support in one
+// pass (bounded by tree depth; ample for real linear-tree configs).
+#define CUDA_MAX_LINEAR_FEAT 256
+
+// Per data point, accumulate its contribution to its leaf's h-weighted normal
+// equations XtHX (upper triangle, row-major) and Xtg. Mirrors the CPU inner loop
+// in LinearTreeLearner::CalculateLinear (float row, double accumulation, g applied
+// before the hessian scaling). NaN rows are skipped (and not counted), matching the
+// CPU HAS_NAN branch; for NaN-free data every leaf row is counted == leaf_count.
+__global__ void CalcLinearGramKernel(
+    const data_size_t num_data,
+    const int* __restrict__ data_index_to_leaf_index,
+    const float* __restrict__ raw_data,
+    const data_size_t num_data_stride,
+    const score_t* __restrict__ gradients,
+    const score_t* __restrict__ hessians,
+    const int* __restrict__ leaf_num_feat,
+    const int* __restrict__ leaf_feat_offset,
+    const int* __restrict__ leaf_feat_col,
+    const int* __restrict__ leaf_xthx_offset,
+    const int* __restrict__ leaf_xtg_offset,
+    double* __restrict__ xthx,
+    double* __restrict__ xtg,
+    int* __restrict__ leaf_nonzero) {
+  const data_size_t i = static_cast<data_size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (i >= num_data) {
+    return;
+  }
+  const int leaf = data_index_to_leaf_index[i];
+  if (leaf < 0) {
+    return;
+  }
+  const int num_feat = leaf_num_feat[leaf];
+  const int foff = leaf_feat_offset[leaf];
+  float curr_row[CUDA_MAX_LINEAR_FEAT + 1];
+  for (int f = 0; f < num_feat; ++f) {
+    const int col = leaf_feat_col[foff + f];
+    const float val = raw_data[static_cast<size_t>(col) * num_data_stride + i];
+    if (isnan(val)) {
+      return;
+    }
+    curr_row[f] = val;
+  }
+  curr_row[num_feat] = 1.0f;
+  const float h = static_cast<float>(hessians[i]);
+  const float g = static_cast<float>(gradients[i]);
+  const int xo = leaf_xthx_offset[leaf];
+  const int go = leaf_xtg_offset[leaf];
+  int j = 0;
+  for (int f1 = 0; f1 < num_feat + 1; ++f1) {
+    double f1_val = static_cast<double>(curr_row[f1]);
+    atomicAdd(xtg + go + f1, f1_val * g);
+    f1_val *= h;
+    for (int f2 = f1; f2 < num_feat + 1; ++f2) {
+      atomicAdd(xthx + xo + j, f1_val * static_cast<double>(curr_row[f2]));
+      ++j;
+    }
+  }
+  atomicAdd(leaf_nonzero + leaf, 1);
+}
+
+// score += leaf_const + sum(coeff * raw_feat); if any used feature is NaN, fall back
+// to the constant leaf output. Mirrors LinearTreeLearner::AddPredictionToScoreInner.
+__global__ void LinearAddScoreKernel(
+    const data_size_t num_data,
+    const int* __restrict__ data_index_to_leaf_index,
+    const float* __restrict__ raw_data,
+    const data_size_t num_data_stride,
+    const double* __restrict__ leaf_const,
+    const double* __restrict__ leaf_coeff,
+    const int* __restrict__ leaf_coeff_offset,
+    const int* __restrict__ leaf_coeff_col,
+    const int* __restrict__ leaf_num_coeff,
+    const double* __restrict__ leaf_output,
+    double* __restrict__ score) {
+  const data_size_t i = static_cast<data_size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (i >= num_data) {
+    return;
+  }
+  const int leaf = data_index_to_leaf_index[i];
+  if (leaf < 0) {
+    return;
+  }
+  double out = leaf_const[leaf];
+  const int nc = leaf_num_coeff[leaf];
+  const int off = leaf_coeff_offset[leaf];
+  bool nan_found = false;
+  for (int k = 0; k < nc; ++k) {
+    const int col = leaf_coeff_col[off + k];
+    const float val = raw_data[static_cast<size_t>(col) * num_data_stride + i];
+    if (isnan(val)) {
+      nan_found = true;
+      break;
+    }
+    out += leaf_coeff[off + k] * static_cast<double>(val);
+  }
+  score[i] += nan_found ? leaf_output[leaf] : out;
+}
+
+void CUDASingleGPUTreeLearner::LaunchCalcLinearGramKernel(
+    const int* cuda_data_index_to_leaf_index, const score_t* gradients, const score_t* hessians,
+    const int* leaf_num_feat, const int* leaf_feat_offset, const int* leaf_feat_col,
+    const int* leaf_xthx_offset, const int* leaf_xtg_offset, int /*num_leaves*/,
+    double* cuda_xthx, double* cuda_xtg, int* cuda_leaf_nonzero) {
+  if (num_data_ <= 0) {
+    return;
+  }
+  const int block = 256;
+  const int grid = (num_data_ + block - 1) / block;
+  CalcLinearGramKernel<<<grid, block>>>(
+    num_data_, cuda_data_index_to_leaf_index, cuda_raw_data_.RawData(), num_data_,
+    gradients, hessians, leaf_num_feat, leaf_feat_offset, leaf_feat_col,
+    leaf_xthx_offset, leaf_xtg_offset, cuda_xthx, cuda_xtg, cuda_leaf_nonzero);
+  SynchronizeCUDADevice(__FILE__, __LINE__);
+}
+
+void CUDASingleGPUTreeLearner::LaunchLinearAddScoreKernel(
+    const int* cuda_data_index_to_leaf_index, const double* cuda_leaf_const,
+    const double* cuda_leaf_coeff, const int* cuda_leaf_coeff_offset, const int* cuda_leaf_coeff_col,
+    const int* leaf_num_coeff, const double* cuda_leaf_output, double* score) const {
+  if (num_data_ <= 0) {
+    return;
+  }
+  const int block = 256;
+  const int grid = (num_data_ + block - 1) / block;
+  LinearAddScoreKernel<<<grid, block>>>(
+    num_data_, cuda_data_index_to_leaf_index, cuda_raw_data_.RawData(), num_data_,
+    cuda_leaf_const, cuda_leaf_coeff, cuda_leaf_coeff_offset, cuda_leaf_coeff_col,
+    leaf_num_coeff, cuda_leaf_output, score);
+  SynchronizeCUDADevice(__FILE__, __LINE__);
+}
+
 }  // namespace LightGBM
 
 #endif  // USE_CUDA

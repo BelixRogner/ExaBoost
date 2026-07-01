@@ -63,6 +63,30 @@ class CUDASingleGPUTreeLearner: public SerialTreeLearner, public NCCLInfo {
  protected:
   void BeforeTrain() override;
 
+  // ---- linear tree support ----
+  // Upload raw (un-binned) numerical feature columns to the GPU (feature-major).
+  // Only done when config_->linear_tree is set; mirrors the host Dataset::raw_data_.
+  void InitLinearTreeCUDA(const Dataset* train_data);
+  // Fit a linear model (const + sum coeff*rawfeat) at each leaf of the just-built
+  // tree, matching the CPU LinearTreeLearner. Heavy XtHX/Xtg accumulation runs on
+  // the GPU; the small per-leaf solve runs on the host (Eigen) for CPU parity.
+  void CalculateLinearCUDA(CUDATree* tree, const score_t* gradients, const score_t* hessians, bool is_first_tree);
+  // Build the device per-leaf linear model arrays from the tree's CURRENT (post-shrinkage)
+  // coefficients and upload them, so the score kernel matches the tree exactly (as the CPU
+  // LinearTreeLearner does by reading tree->LeafConst/LeafCoeffs at score time).
+  void BuildAndUploadLinearScoreModel(const Tree* tree) const;
+  // Launch the per-leaf XtHX (upper-triangle) + Xtg accumulation kernel.
+  void LaunchCalcLinearGramKernel(
+    const int* cuda_data_index_to_leaf_index, const score_t* gradients, const score_t* hessians,
+    const int* leaf_num_feat, const int* leaf_feat_offset, const int* leaf_feat_col,
+    const int* leaf_xthx_offset, const int* leaf_xtg_offset, int num_leaves,
+    double* cuda_xthx, double* cuda_xtg, int* cuda_leaf_nonzero);
+  // Launch the linear score-update kernel (score += const + sum coeff*rawfeat, NaN -> leaf_output).
+  void LaunchLinearAddScoreKernel(
+    const int* cuda_data_index_to_leaf_index, const double* cuda_leaf_const,
+    const double* cuda_leaf_coeff, const int* cuda_leaf_coeff_offset, const int* cuda_leaf_coeff_col,
+    const int* leaf_num_coeff, const double* cuda_leaf_output, double* score) const;
+
   void ReduceLeafStat(CUDATree* old_tree, const score_t* gradients, const score_t* hessians, const data_size_t* num_data_in_leaf) const;
 
   void LaunchReduceLeafStatKernel(const score_t* gradients, const score_t* hessians, const data_size_t* num_data_in_leaf,
@@ -184,6 +208,33 @@ class CUDASingleGPUTreeLearner: public SerialTreeLearner, public NCCLInfo {
   /*! \brief hessians on CPU */
   std::vector<score_t> host_hessians_;
   #endif  // DEBUG
+
+  // ---- linear tree support ----
+  // Raw un-binned numerical feature values on device, feature-major:
+  // cuda_raw_data_[col * num_data_ + row]. col indexes numerical features in
+  // dataset feature order (== host Dataset::numeric_feature_map_ order).
+  CUDAVector<float> cuda_raw_data_;
+  int num_numeric_features_ = 0;
+  // inner feature index -> numeric column in cuda_raw_data_ (-1 if categorical)
+  std::vector<int> inner_feature_to_numeric_col_;
+  // device scratch for the per-leaf gram accumulation
+  CUDAVector<double> cuda_linear_xthx_;
+  CUDAVector<double> cuda_linear_xtg_;
+  CUDAVector<int> cuda_linear_nonzero_;
+  CUDAVector<int> cuda_linear_leaf_num_feat_;
+  CUDAVector<int> cuda_linear_leaf_feat_offset_;
+  CUDAVector<int> cuda_linear_leaf_feat_col_;
+  CUDAVector<int> cuda_linear_leaf_xthx_offset_;
+  CUDAVector<int> cuda_linear_leaf_xtg_offset_;
+  // device copies of the fitted per-leaf linear model, used by the score kernel.
+  // Rebuilt from the (post-shrinkage) tree at score time, so mutable/const-built.
+  mutable CUDAVector<double> cuda_linear_leaf_const_;
+  mutable CUDAVector<double> cuda_linear_leaf_coeff_;
+  mutable CUDAVector<int> cuda_linear_leaf_coeff_offset_;
+  mutable CUDAVector<int> cuda_linear_leaf_coeff_col_;
+  mutable CUDAVector<int> cuda_linear_leaf_num_coeff_;
+  mutable CUDAVector<double> cuda_linear_leaf_output_;
+  mutable bool last_tree_is_linear_ = false;
 };
 
 }  // namespace LightGBM

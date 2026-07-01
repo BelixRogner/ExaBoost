@@ -422,11 +422,11 @@ void Config::CheckParamConflict(const std::unordered_map<std::string, std::strin
       Log::Warning("Although \"deterministic\" is set, the results ran by GPU may be non-deterministic.");
     }
   }
-  // linear tree learner must be serial type and run on CPU device
+  // linear tree learner must be serial type and run on CPU, GPU or CUDA device
   if (linear_tree) {
-    if (device_type != std::string("cpu") && device_type != std::string("gpu")) {
+    if (device_type != std::string("cpu") && device_type != std::string("gpu") && device_type != std::string("cuda")) {
       device_type = "cpu";
-      Log::Warning("Linear tree learner only works with CPU and GPU. Falling back to CPU now.");
+      Log::Warning("Linear tree learner only works with CPU, GPU and CUDA. Falling back to CPU now.");
     }
     if (tree_learner != std::string("serial")) {
       tree_learner = "serial";

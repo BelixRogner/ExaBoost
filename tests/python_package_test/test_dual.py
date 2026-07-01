@@ -879,3 +879,92 @@ def test_cuda_quantized_32bit_histogram_matches_cpu(n):
     corr = float(np.corrcoef(preds["cpu"], preds["cuda"])[0, 1])
     # Before the fix, 32-bit-histogram leaves (n>=8000) gave correlation ~0.
     assert corr > 0.99, f"CUDA quantized (32-bit histogram) diverges from CPU: corr={corr:.4f} (n={n})"
+
+
+_REQUIRES_CUDA = pytest.mark.skipif(
+    os.environ.get("TASK", "") != "cuda",
+    reason="requires CUDA-enabled LightGBM build (set TASK=cuda)",
+)
+
+
+def _make_linear_regression(n, d, seed, nan=False):
+    rng = np.random.default_rng(seed)
+    X = rng.standard_normal((n, d)).astype(np.float64)
+    coef = rng.standard_normal(d)
+    y = (X @ coef + 0.3 * rng.standard_normal(n)).astype(np.float64)
+    if nan:
+        X[rng.random((n, d)) < 0.05] = np.nan
+    return X, y
+
+
+@_REQUIRES_CUDA
+@pytest.mark.parametrize(
+    ("num_leaves", "linear_lambda"),
+    [(15, 0.0), (31, 0.5), (63, 5.0)],
+)
+def test_cuda_linear_tree_matches_cpu(num_leaves, linear_lambda):
+    """linear_tree on the CUDA tree learner must match the CPU LinearTreeLearner.
+
+    The per-leaf linear model (const + sum coeff*raw_feat) is fit on-device (GPU
+    XtHX/Xtg accumulation) with the same math as CPU. For L2 regression (constant
+    hessian) the fit is bit-identical up to floating-point summation order, so a
+    boosted model of linear-leaf trees reproduces the CPU predictions to ~1e-6.
+    (The on-device gram uses atomic float adds, so ~1e-15/tree order differences
+    can, at aggressive leaf counts, flip a borderline split and diverge structurally
+    -- the same way non-linear CUDA can; these configs are in the stable regime.)
+    """
+    X, y = _make_linear_regression(4000, 10, seed=0)
+    preds = {}
+    for device_type in ("cpu", "cuda"):
+        params = {
+            "objective": "regression",
+            "num_leaves": num_leaves,
+            "min_data_in_leaf": 20,
+            "learning_rate": 0.1,
+            "linear_tree": True,
+            "linear_lambda": linear_lambda,
+            "verbose": -1,
+            "deterministic": True,
+            "num_threads": 1,
+            "seed": 7,
+            "gpu_use_dp": True,
+            "force_col_wise": True,
+            "feature_pre_filter": False,
+            "device_type": device_type,
+        }
+        ds = lgb.Dataset(X, label=y, params=params)
+        bst = lgb.train(params, ds, num_boost_round=30)
+        preds[device_type] = bst.predict(X)
+        # sanity: the model actually fit linear leaves, not constant fallbacks
+        assert "leaf_coeff" in str(bst.dump_model()["tree_info"][5])
+    max_diff = float(np.max(np.abs(preds["cpu"] - preds["cuda"])))
+    assert max_diff < 1e-6, f"CUDA linear tree diverges from CPU: max|diff|={max_diff:.3e}"
+
+
+@_REQUIRES_CUDA
+def test_cuda_linear_tree_handles_nan_like_cpu():
+    """Rows with NaN in a leaf's linear features fall back to the leaf's constant
+    output, on both CPU and CUDA; the fit must also skip NaN rows identically.
+    Uses a modest leaf count so the NaN-skipping fit stays in the bit-exact regime."""
+    X, y = _make_linear_regression(4000, 10, seed=5, nan=True)
+    preds = {}
+    for device_type in ("cpu", "cuda"):
+        params = {
+            "objective": "regression",
+            "num_leaves": 15,
+            "min_data_in_leaf": 20,
+            "learning_rate": 0.1,
+            "linear_tree": True,
+            "verbose": -1,
+            "deterministic": True,
+            "num_threads": 1,
+            "seed": 7,
+            "gpu_use_dp": True,
+            "force_col_wise": True,
+            "feature_pre_filter": False,
+            "device_type": device_type,
+        }
+        ds = lgb.Dataset(X, label=y, params=params)
+        preds[device_type] = lgb.train(params, ds, num_boost_round=30).predict(X)
+    max_diff = float(np.max(np.abs(preds["cpu"] - preds["cuda"])))
+    assert max_diff < 1e-6, f"CUDA linear tree (NaN) diverges from CPU: max|diff|={max_diff:.3e}"
