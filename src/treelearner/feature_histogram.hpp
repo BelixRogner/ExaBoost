@@ -9,6 +9,7 @@
 
 #include <LightGBM/bin.h>
 #include <LightGBM/dataset.h>
+#include <LightGBM/tree_split_math.h>
 #include <LightGBM/utils/array_args.h>
 
 #include <algorithm>
@@ -709,9 +710,10 @@ class FeatureHistogram {
    */
   void set_is_splittable(bool val) { is_splittable_ = val; }
 
+  // Delegates to the shared SplitGainMath core (tree_split_math.h) so CPU and
+  // CUDA never diverge on these formulas.
   static double ThresholdL1(double s, double l1) {
-    const double reg_s = std::max(0.0, std::fabs(s) - l1);
-    return Common::Sign(s) * reg_s;
+    return SplitGainMath::ThresholdL1(s, l1);
   }
 
   template <bool USE_L1, bool USE_MAX_OUTPUT, bool USE_SMOOTHING>
@@ -720,22 +722,8 @@ class FeatureHistogram {
                                             double l2, double max_delta_step,
                                             double smoothing, data_size_t num_data,
                                             double parent_output) {
-    double ret;
-    if (USE_L1) {
-      ret = -ThresholdL1(sum_gradients, l1) / (sum_hessians + l2);
-    } else {
-      ret = -sum_gradients / (sum_hessians + l2);
-    }
-    if (USE_MAX_OUTPUT) {
-      if (max_delta_step > 0 && std::fabs(ret) > max_delta_step) {
-        ret = Common::Sign(ret) * max_delta_step;
-      }
-    }
-    if (USE_SMOOTHING) {
-      ret = ret * (num_data / smoothing) / (num_data / smoothing + 1) \
-          + parent_output / (num_data / smoothing + 1);
-    }
-    return ret;
+    return SplitGainMath::CalculateLeafOutput<USE_L1, USE_MAX_OUTPUT, USE_SMOOTHING>(
+        sum_gradients, sum_hessians, l1, l2, max_delta_step, smoothing, num_data, parent_output);
   }
 
   template <bool USE_MC, bool USE_L1, bool USE_MAX_OUTPUT, bool USE_SMOOTHING>
@@ -819,13 +807,8 @@ class FeatureHistogram {
   static double GetLeafGainGivenOutput(double sum_gradients,
                                        double sum_hessians, double l1,
                                        double l2, double output) {
-    if (USE_L1) {
-      const double sg_l1 = ThresholdL1(sum_gradients, l1);
-      return -(2.0 * sg_l1 * output + (sum_hessians + l2) * output * output);
-    } else {
-      return -(2.0 * sum_gradients * output +
-               (sum_hessians + l2) * output * output);
-    }
+    return SplitGainMath::LeafGainGivenOutput<USE_L1>(
+        sum_gradients, sum_hessians, l1, l2, output);
   }
 
   template <bool USE_RAND, bool USE_MC, bool USE_L1, bool USE_MAX_OUTPUT, bool USE_SMOOTHING,
