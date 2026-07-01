@@ -67,6 +67,12 @@ void CUDASingleGPUTreeLearner::Init(const Dataset* train_data, bool is_constant_
   cuda_best_split_finder_.reset(new CUDABestSplitFinder(cuda_histogram_constructor_->cuda_hist(),
     train_data_, this->share_state_->feature_hist_offsets(), select_features_by_node_, config_));
   cuda_best_split_finder_->Init();
+  // Wire the histogram constructor's completion events into the best split finder so
+  // per-leaf FindBestSplits kernels are ordered after histogram construction/subtraction
+  // via cudaStreamWaitEvent instead of per-split device syncs.
+  cuda_best_split_finder_->SetHistogramEvents(
+    cuda_histogram_constructor_->construct_done_event(),
+    cuda_histogram_constructor_->subtract_done_event());
 
   leaf_best_split_feature_.resize(config_->num_leaves, -1);
   leaf_best_split_threshold_.resize(config_->num_leaves, 0);

@@ -47,6 +47,15 @@ class CUDAHistogramConstructor {
 
   void Init(const Dataset* train_data, TrainingShareStates* share_state);
 
+  /*! \brief Event recorded on cuda_stream_ after the smaller-leaf histogram is
+   *  constructed. The best split finder waits on it (cudaStreamWaitEvent) before
+   *  reading the smaller-leaf histogram, replacing a per-split device sync. */
+  cudaEvent_t construct_done_event() const { return construct_done_event_; }
+  /*! \brief Event recorded on cuda_stream_ after the larger-leaf histogram is
+   *  produced by subtraction. The best split finder waits on it before reading
+   *  the larger-leaf histogram. */
+  cudaEvent_t subtract_done_event() const { return subtract_done_event_; }
+
   void ZeroHistForLeaf(int leaf_index);
 
   void ConstructHistogramForLeaf(
@@ -166,6 +175,10 @@ class CUDAHistogramConstructor {
   double min_sum_hessian_in_leaf_;
   /*! \brief cuda stream for histogram construction */
   cudaStream_t cuda_stream_;
+  /*! \brief recorded on cuda_stream_ after smaller-leaf histogram construction */
+  cudaEvent_t construct_done_event_ = nullptr;
+  /*! \brief recorded on cuda_stream_ after larger-leaf histogram subtraction */
+  cudaEvent_t subtract_done_event_ = nullptr;
   /*! \brief indices of feature whose histograms need to be fixed */
   std::vector<int> need_fix_histogram_features_;
   /*! \brief aligned number of bins of the features whose histograms need to be fixed */
