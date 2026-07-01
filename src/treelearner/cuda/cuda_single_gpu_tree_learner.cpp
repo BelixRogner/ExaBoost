@@ -15,8 +15,6 @@
 #include <LightGBM/network.h>
 #include <LightGBM/objective_function.h>
 
-#include <Eigen/Dense>
-
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
@@ -25,6 +23,8 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+
+#include "../linear_leaf_solver.h"
 
 namespace LightGBM {
 
@@ -1156,39 +1156,11 @@ void CUDASingleGPUTreeLearner::CalculateLinearCUDA(
       tree->SetLeafConst(leaf, tree->LeafOutput(leaf));
       continue;
     }
-    Eigen::MatrixXd XTHX_mat(num_feat + 1, num_feat + 1);
-    Eigen::MatrixXd XTg_mat(num_feat + 1, 1);
-    const int xo = xthx_offset[leaf];
-    const int go = xtg_offset[leaf];
-    int j = 0;
-    for (int f1 = 0; f1 < num_feat + 1; ++f1) {
-      for (int f2 = f1; f2 < num_feat + 1; ++f2) {
-        XTHX_mat(f1, f2) = h_xthx[xo + j];
-        XTHX_mat(f2, f1) = XTHX_mat(f1, f2);
-        if (f1 == f2 && f1 < num_feat) {
-          XTHX_mat(f1, f2) += lambda;
-        }
-        ++j;
-      }
-      XTg_mat(f1) = h_xtg[go + f1];
-    }
-    Eigen::MatrixXd coeffs = -XTHX_mat.fullPivLu().inverse() * XTg_mat;
-    std::vector<double> coeffs_vec;
-    std::vector<int> features_new;  // inner feature indices
-    for (int i = 0; i < num_feat; ++i) {
-      if (coeffs(i) < -kZeroThreshold || coeffs(i) > kZeroThreshold) {
-        coeffs_vec.push_back(coeffs(i));
-        features_new.push_back(leaf_feat_inner[leaf][i]);
-      }
-    }
-    tree->SetLeafFeaturesInner(leaf, features_new);
-    std::vector<int> features_raw(features_new.size());
-    for (size_t i = 0; i < features_new.size(); ++i) {
-      features_raw[i] = train_data_->RealFeatureIndex(features_new[i]);
-    }
-    tree->SetLeafFeatures(leaf, features_raw);
-    tree->SetLeafCoeffs(leaf, coeffs_vec);
-    tree->SetLeafConst(leaf, coeffs(num_feat));
+    // Device-agnostic solve + store, shared with the CPU LinearTreeLearner.
+    LinearLeafSolver::SolveAndStore(
+        tree, leaf, num_feat, h_xthx.data() + xthx_offset[leaf], h_xtg.data() + xtg_offset[leaf],
+        leaf_feat_inner[leaf], train_data_, lambda,
+        /*is_refit=*/false, /*decay_rate=*/0.0, /*shrinkage=*/0.0, /*old_coeff_idx=*/{});
   }
 }
 

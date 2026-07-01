@@ -5,11 +5,11 @@
  */
 #include "linear_tree_learner.h"
 
-#include <Eigen/Dense>
-
 #include <algorithm>
 #include <memory>
 #include <vector>
+
+#include "linear_leaf_solver.h"
 
 namespace LightGBM {
 
@@ -349,54 +349,12 @@ void LinearTreeLearner<TREE_LEARNER_TYPE>::CalculateLinear(Tree* tree, bool is_r
       }
       continue;
     }
-    size_t num_feat = leaf_features[leaf_num].size();
-    Eigen::MatrixXd XTHX_mat(num_feat + 1, num_feat + 1);
-    Eigen::MatrixXd XTg_mat(num_feat + 1, 1);
-    size_t j = 0;
-    for (size_t feat1 = 0; feat1 < num_feat + 1; ++feat1) {
-      for (size_t feat2 = feat1; feat2 < num_feat + 1; ++feat2) {
-        XTHX_mat(feat1, feat2) = XTHX_[leaf_num][j];
-        XTHX_mat(feat2, feat1) = XTHX_mat(feat1, feat2);
-        if ((feat1 == feat2) && (feat1 < num_feat)) {
-          XTHX_mat(feat1, feat2) += this->config_->linear_lambda;
-        }
-        ++j;
-      }
-      XTg_mat(feat1) = XTg_[leaf_num][feat1];
-    }
-    Eigen::MatrixXd coeffs = - XTHX_mat.fullPivLu().inverse() * XTg_mat;
-    std::vector<double> coeffs_vec;
-    std::vector<int> features_new;
-    std::vector<double> old_coeffs = tree->LeafCoeffs(leaf_num);
-    for (size_t i = 0; i < leaf_features[leaf_num].size(); ++i) {
-      if (is_refit) {
-        features_new.push_back(leaf_features[leaf_num][i]);
-        // use old_coeff_idx to correctly map position i back to the original coefficient,
-        // since some features may have been skipped (absent from the refit dataset)
-        int old_i = leaf_old_coeff_idx[leaf_num][i];
-        coeffs_vec.push_back(decay_rate * old_coeffs[old_i] + (1.0 - decay_rate) * coeffs(i) * shrinkage);
-      } else {
-        if (coeffs(i) < -kZeroThreshold || coeffs(i) > kZeroThreshold) {
-          coeffs_vec.push_back(coeffs(i));
-          int feat = leaf_features[leaf_num][i];
-          features_new.push_back(feat);
-        }
-      }
-    }
-    // update the tree properties
-    tree->SetLeafFeaturesInner(leaf_num, features_new);
-    std::vector<int> features_raw(features_new.size());
-    for (size_t i = 0; i < features_new.size(); ++i) {
-      features_raw[i] = this->train_data_->RealFeatureIndex(features_new[i]);
-    }
-    tree->SetLeafFeatures(leaf_num, features_raw);
-    tree->SetLeafCoeffs(leaf_num, coeffs_vec);
-    if (is_refit) {
-      double old_const = tree->LeafConst(leaf_num);
-      tree->SetLeafConst(leaf_num, decay_rate * old_const + (1.0 - decay_rate) * coeffs(num_feat) * shrinkage);
-    } else {
-      tree->SetLeafConst(leaf_num, coeffs(num_feat));
-    }
+    // Device-agnostic solve + store (shared with the CUDA tree learner).
+    const int num_feat = static_cast<int>(leaf_features[leaf_num].size());
+    LinearLeafSolver::SolveAndStore(
+        tree, leaf_num, num_feat, XTHX_[leaf_num].data(), XTg_[leaf_num].data(),
+        leaf_features[leaf_num], this->train_data_, this->config_->linear_lambda,
+        is_refit, decay_rate, shrinkage, leaf_old_coeff_idx[leaf_num]);
   }
 }
 
