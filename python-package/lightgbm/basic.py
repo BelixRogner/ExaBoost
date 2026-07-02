@@ -57,6 +57,7 @@ _ctypes_int_array = Union[
 _ctypes_float_ptr = Union[
     "ctypes._Pointer[ctypes.c_float]",
     "ctypes._Pointer[ctypes.c_double]",
+    "ctypes._Pointer[ctypes.c_int8]",
 ]
 _ctypes_float_array = Union[
     "ctypes.Array[ctypes._Pointer[ctypes.c_float]]",

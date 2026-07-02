@@ -21,7 +21,6 @@ from .basic import (
     LightGBMError,
     _choose_param_value,
     _ConfigAliases,
-    _is_pyarrow_array,
     _LGBM_BoosterBestScoreType,
     _LGBM_CategoricalFeatureConfiguration,
     _LGBM_EvalFunctionResultType,
@@ -1619,7 +1618,10 @@ class LGBMClassifier(_LGBMClassifierBase, LGBMModel):
         # Array / ChunkedArray ("Please set `allow_series=True`...") because
         # sklearn does not pass that flag. Convert eagerly to numpy on this
         # side so the downstream sklearn calls see a familiar 1-D array.
-        if _is_pyarrow_array(y):
+        # Detect pyarrow by module (both pa.Array and pa.ChunkedArray live in
+        # pyarrow.lib) without importing pyarrow or relying on compat symbols
+        # removed by the upstream Arrow PyCapsule refactor.
+        if type(y).__module__.split(".", 1)[0] == "pyarrow":
             # np.asarray goes through pyarrow's __array__ and works on both
             # pa.Array and pa.ChunkedArray across every supported pyarrow
             # version (ChunkedArray.to_numpy(zero_copy_only=...) is unavailable
