@@ -478,7 +478,10 @@ jobs:
       - test-linux-aarch64
     runs-on: ubuntu-latest
     # publish whenever a new commit is pushed to 'master'
-    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    # (only on the upstream repo -- forks lack the ANACONDA_API_TOKEN secret)
+    if: >-
+      github.event_name == 'push' && github.ref == 'refs/heads/master'
+      && github.repository == 'lightgbm-org/LightGBM'
     environment:
       name: nightly-python-uploads
       url: https://anaconda.org/lightgbm-packages/lightgbm

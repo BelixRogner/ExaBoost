@@ -1286,3 +1286,34 @@ def test_refit_correctly_handles_categorical_features_in_params(rng) -> None:
         match=re.escape("Using refit() to change which columns are treated as categorical is not supported"),
     ):
         loaded_bst_new = loaded_bst.refit(X_new, y_new, categorical_feature=[0, 1])
+
+
+def test_public_api_symbols_are_exposed():
+    """Smoke test: the core public API must always be importable.
+
+    lightgbm/__init__.py imports the sklearn and dask classes under
+    ``try/except ImportError``, so if a submodule fails to import (e.g. a
+    merge drops a symbol another module imports), those names are *silently*
+    removed from the package. That previously surfaced only as a confusing
+    ``test_sklearn`` collection error ("module 'lightgbm' has no attribute
+    'LGBMModel'"). This test fails loudly and clearly instead.
+
+    The sklearn estimators have compat shims and do not require scikit-learn,
+    so they must be present regardless of which optional deps are installed.
+    (Dask classes are intentionally excluded -- they legitimately require dask.)
+    """
+    for name in (
+        "LGBMModel",
+        "LGBMClassifier",
+        "LGBMRegressor",
+        "LGBMRanker",
+        "Booster",
+        "Dataset",
+        "train",
+        "cv",
+        "register_logger",
+    ):
+        assert hasattr(lgb, name), (
+            f"lightgbm.{name} is missing -- a submodule import likely failed "
+            f"(check lightgbm/__init__.py's try/except ImportError blocks)"
+        )
